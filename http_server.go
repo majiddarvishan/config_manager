@@ -4,11 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
+	// "net"
 	"net/http"
 	"os"
 
 	"github.com/iancoleman/orderedmap"
+	"github.com/rs/cors"
 )
 
 type http_server struct {
@@ -24,7 +25,7 @@ func NewHttpServer(m *Manager, conf *Node) *http_server {
 		manager: m,
 	}
 
-    p, err := conf.At("address")
+	p, err := conf.At("address")
 	if err != nil {
 		fmt.Printf("Error %v is occured when reading address", err)
 	}
@@ -33,7 +34,7 @@ func NewHttpServer(m *Manager, conf *Node) *http_server {
 		fmt.Printf("Error %v is occured when reading address", err)
 	}
 
-    p, err = conf.At("port")
+	p, err = conf.At("port")
 	if err != nil {
 		fmt.Printf("Error %v is occured when reading port", err)
 	}
@@ -41,9 +42,9 @@ func NewHttpServer(m *Manager, conf *Node) *http_server {
 	if err != nil {
 		fmt.Printf("Error %v is occured when reading port", err)
 	}
-    hs.port = int16(val)
+	hs.port = int16(val)
 
-    p, err = conf.At("api_key")
+	p, err = conf.At("api_key")
 	if err != nil {
 		fmt.Printf("Error %v is occured when reading api_key", err)
 	}
@@ -52,25 +53,27 @@ func NewHttpServer(m *Manager, conf *Node) *http_server {
 		fmt.Printf("Error %v is occured when reading api_key", err)
 	}
 
-    return hs
+	return hs
 }
 
 func (hs *http_server) Start() {
 	sm := http.NewServeMux()
+
 	sm.HandleFunc("/config", hs.handleConfig)
 
-    addr := fmt.Sprintf("%s:%d", hs.address, hs.port)
+	addr := fmt.Sprintf("%s:%d", hs.address, hs.port)
 
-	l, err := net.Listen("tcp4", addr)
+	handler := cors.New(cors.Options{
+		AllowedOrigins:   []string{"*"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-API-Key"},
+		AllowCredentials: true,
+	}).Handler(sm)
+
+	err := http.ListenAndServe(addr, handler)
 	if err != nil {
 		fmt.Printf("error on listening server: %s\n", err)
-        os.Exit(1)
-	}
-
-	err = http.Serve(l, sm)
-	if err != nil {
-		fmt.Printf("error starting server: %s\n", err)
-        os.Exit(1)
+		os.Exit(1)
 	}
 }
 
@@ -134,7 +137,7 @@ func (hs *http_server) on_post_request(w http.ResponseWriter, r *http.Request) {
 		panic("should be there!")
 	}
 	// var value = val.(orderedmap.OrderedMap)
-    var value = val
+	var value = val
 
 	//todo
 	// var config_hash = body_json["config_hash"].(string)
@@ -184,10 +187,10 @@ func (hs *http_server) check_access(r *http.Request) bool {
 }
 
 func (hs *http_server) latest_config_state(w http.ResponseWriter) {
-    var conf_json = orderedmap.New()
+	var conf_json = orderedmap.New()
 	json.Unmarshal([]byte(*(hs.manager.source.getConfig())), &conf_json)
 
-    var schema_json = orderedmap.New()
+	var schema_json = orderedmap.New()
 	json.Unmarshal([]byte(*(hs.manager.source.getSchema())), &schema_json)
 
 	// body := map[string]interface{}{
@@ -201,17 +204,17 @@ func (hs *http_server) latest_config_state(w http.ResponseWriter) {
 	// 	"schema": schema_json,
 	// }
 
-    var modifiable_paths_map = orderedmap.New()
-    modifiable_paths_map.Set("insertable", hs.manager.getInsertablePaths())
-    modifiable_paths_map.Set("removable", hs.manager.getRemovablePaths())
-    modifiable_paths_map.Set("replaceable", hs.manager.getReplaceablePaths())
+	var modifiable_paths_map = orderedmap.New()
+	modifiable_paths_map.Set("insertable", hs.manager.getInsertablePaths())
+	modifiable_paths_map.Set("removable", hs.manager.getRemovablePaths())
+	modifiable_paths_map.Set("replaceable", hs.manager.getReplaceablePaths())
 
-    var body_map = orderedmap.New()
-    body_map.Set("modifiable_paths", modifiable_paths_map)
-    body_map.Set("config", conf_json)
-    body_map.Set("schema", schema_json)
+	var body_map = orderedmap.New()
+	body_map.Set("modifiable_paths", modifiable_paths_map)
+	body_map.Set("config", conf_json)
+	body_map.Set("schema", schema_json)
 
-    // body := orderedmap.OrderedMap{
+	// body := orderedmap.OrderedMap{
 	// 	"modifiable_paths": map[string]interface{}{
 	// 		"insertable":  hs.manager.getInsertablePaths(),
 	// 		"removable":   hs.manager.getRemovablePaths(),
