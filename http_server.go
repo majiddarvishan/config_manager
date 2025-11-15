@@ -1,9 +1,12 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+
 	// "net"
 	"net/http"
 	"os"
@@ -139,11 +142,17 @@ func (hs *http_server) on_post_request(w http.ResponseWriter, r *http.Request) {
 	// var value = val.(orderedmap.OrderedMap)
 	var value = val
 
-	//todo
-	// var config_hash = body_json["config_hash"].(string)
+	val, present = body_json.Get("config_hash")
+	if !present {
+		panic("should be there!")
+	}
+	var config_hash = val.(string)
 
-	// if (config_hash != std::to_string(std::hash<std::string>{}(manager_->source().get_config().dump())))
-	//     throw std::logic_error{ "Config hash is invalid, application config is modified from elsewhere" };
+	// var config_hash = body_json["config_hash"].(string)
+	if config_hash != HashSHA256(*(hs.manager.source.getConfig())) {
+		fmt.Println("Config hash is invalid, application config is modified from elsewhere")
+		return
+	}
 
 	if op == "insert" {
 		val, present = body_json.Get("index")
@@ -186,23 +195,17 @@ func (hs *http_server) check_access(r *http.Request) bool {
 	return (r.Header.Get("X-API-Key") == hs.api_key)
 }
 
+func HashSHA256(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
 func (hs *http_server) latest_config_state(w http.ResponseWriter) {
 	var conf_json = orderedmap.New()
 	json.Unmarshal([]byte(*(hs.manager.source.getConfig())), &conf_json)
 
 	var schema_json = orderedmap.New()
 	json.Unmarshal([]byte(*(hs.manager.source.getSchema())), &schema_json)
-
-	// body := map[string]interface{}{
-	// 	"modifiable_paths": map[string]interface{}{
-	// 		"insertable":  hs.manager.getInsertablePaths(),
-	// 		"removable":   hs.manager.getRemovablePaths(),
-	// 		"replaceable": hs.manager.getReplaceablePaths(),
-	// 	},
-	// 	"config": conf_json,
-	// 	//   "config_hash" : std::to_string(std::hash<std::string>{}(manager_->source().get_config().dump())),
-	// 	"schema": schema_json,
-	// }
 
 	var modifiable_paths_map = orderedmap.New()
 	modifiable_paths_map.Set("insertable", hs.manager.getInsertablePaths())
@@ -213,17 +216,7 @@ func (hs *http_server) latest_config_state(w http.ResponseWriter) {
 	body_map.Set("modifiable_paths", modifiable_paths_map)
 	body_map.Set("config", conf_json)
 	body_map.Set("schema", schema_json)
-
-	// body := orderedmap.OrderedMap{
-	// 	"modifiable_paths": map[string]interface{}{
-	// 		"insertable":  hs.manager.getInsertablePaths(),
-	// 		"removable":   hs.manager.getRemovablePaths(),
-	// 		"replaceable": hs.manager.getReplaceablePaths(),
-	// 	},
-	// 	"config": conf_json,
-	// 	//   "config_hash" : std::to_string(std::hash<std::string>{}(manager_->source().get_config().dump())),
-	// 	"schema": schema_json,
-	// }
+	body_map.Set("config_hash", HashSHA256(*(hs.manager.source.getConfig())))
 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json")
