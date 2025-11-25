@@ -87,8 +87,9 @@ func jsonRemoveByPath(jsonMap *orderedmap.OrderedMap, path string, index int) bo
 		return false
 	}
 
-	if index > len(found_list.([]interface{})) {
-		panic("Index is out of bounds")
+	if index >= len(found_list.([]interface{})) {
+		fmt.Println("Index is out of bounds")
+        return false
 	}
 
 	found_list = append(found_list.([]interface{})[:index], found_list.([]interface{})[index+1:]...)
