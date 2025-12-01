@@ -64,8 +64,10 @@ func (m *Manager) insert(path string, index int, value interface{}) {
 		panic("should be there!")
 	}
 
-	//todo
-	// validator.Validate(jsonConfig)
+	// err = validate(jsonConfig, m.source.getSchema())
+	// if err != nil {
+	// 	panic("should be there!")
+	// }
 
 	insertingNode := parseNode(value)
 	backupArray, err := mod.Node.GetArray()
@@ -105,8 +107,10 @@ func (m *Manager) remove(path string, index int) {
 		panic("should be there!")
 	}
 
-	//todo
-	// validator.validate(jsonConfig)
+	// err = validate(jsonConfig, m.source.getSchema())
+	// if err != nil {
+	// 	panic("should be there!")
+	// }
 
 	backupArray, err := mod.Node.GetArray()
 	if err != nil {
@@ -145,8 +149,11 @@ func (m *Manager) replace(path string, value interface{}) {
 		panic("should be there!")
 	}
 
-	//todo
-	// validator.Validate(jsonConfig)
+	// err = validate(jsonConfig, m.source.getSchema())
+	// if err != nil {
+	// 	panic("should be there!")
+	// }
+
 	newNode := parseNode(value)
 	// backupNode := *mod.Node
 	mod.Node = newNode

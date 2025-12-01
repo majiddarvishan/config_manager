@@ -125,39 +125,59 @@ func (hs *http_server) on_post_request(w http.ResponseWriter, r *http.Request) {
 
 	val, present := body_json.Get("op")
 	if !present {
-		panic("should be there!")
+		w.Header().Set("access_control_allow_origin", "*")
+		w.Header().Set("content_type", "text/html")
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, fmt.Sprintf("op tag is not present"))
+		return
 	}
 	var op = val.(string)
 
 	val, present = body_json.Get("path")
 	if !present {
-		panic("should be there!")
+		w.Header().Set("access_control_allow_origin", "*")
+		w.Header().Set("content_type", "text/html")
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, fmt.Sprintf("path tag is not present"))
+		return
 	}
 	var path = val.(string)
 
 	val, present = body_json.Get("value")
 	if !present {
-		panic("should be there!")
+		w.Header().Set("access_control_allow_origin", "*")
+		w.Header().Set("content_type", "text/html")
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, fmt.Sprintf("value tag is not present"))
+		return
 	}
 	// var value = val.(orderedmap.OrderedMap)
 	var value = val
 
 	val, present = body_json.Get("config_hash")
 	if !present {
-		panic("should be there!")
+		w.Header().Set("access_control_allow_origin", "*")
+		w.Header().Set("content_type", "text/html")
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, fmt.Sprintf("config_hash tag is not present"))
+		return
 	}
 	var config_hash = val.(string)
 
 	// var config_hash = body_json["config_hash"].(string)
 	if config_hash != HashSHA256(*(hs.manager.source.getConfig())) {
-		fmt.Println("Config hash is invalid, application config is modified from elsewhere")
+		fmt.Println("Config hash is invalid, application config is modified from else where")
 		return
 	}
 
 	if op == "insert" {
 		val, present = body_json.Get("index")
 		if !present {
-			panic("should be there!")
+			w.Header().Set("access_control_allow_origin", "*")
+			w.Header().Set("content_type", "text/html")
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, fmt.Sprintf("index tag is not present"))
+			return
 		}
 		var index = int(val.(float64))
 
@@ -165,7 +185,11 @@ func (hs *http_server) on_post_request(w http.ResponseWriter, r *http.Request) {
 	} else if op == "remove" {
 		val, present = body_json.Get("index")
 		if !present {
-			panic("should be there!")
+			w.Header().Set("access_control_allow_origin", "*")
+			w.Header().Set("content_type", "text/html")
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, fmt.Sprintf("index tag is not present"))
+			return
 		}
 		var index = int(val.(float64))
 
