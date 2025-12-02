@@ -6,5 +6,5 @@ type ISource interface {
 	getConfigObject() *orderedmap.OrderedMap
 	getConfig() *string
 	getSchema() *string
-	setConfig(*orderedmap.OrderedMap)
+	setConfig(*orderedmap.OrderedMap) error
 }

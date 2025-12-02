@@ -37,13 +37,15 @@ func (s *StrSource) getSchema() *string {
 	return &s.schema
 }
 
-func (s *StrSource) setConfig(conf *orderedmap.OrderedMap) {
+func (s *StrSource) setConfig(conf *orderedmap.OrderedMap) error {
 	s.configObject = conf
 
 	configBytes, err := json.MarshalIndent(conf, "", "  ")
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	s.config = string(configBytes)
+
+    return nil
 }

@@ -52,7 +52,7 @@ func (m *Manager) Source() ISource {
 	return m.source
 }
 
-func (m *Manager) insert(path string, index int, value interface{}) {
+func (m *Manager) insert(path string, index int, value interface{}) error {
 	mod, err := m.findModifiable(Insertable, path)
 	if err != nil {
 		panic(err)
@@ -61,7 +61,7 @@ func (m *Manager) insert(path string, index int, value interface{}) {
 	jsonConfig := m.source.getConfigObject()
 	ok := jsonInsertByPath(jsonConfig, path, index, value)
 	if !ok {
-		panic("should be there!")
+		return errors.New("could not insert")
 	}
 
 	// err = validate(jsonConfig, m.source.getSchema())
@@ -72,7 +72,7 @@ func (m *Manager) insert(path string, index int, value interface{}) {
 	insertingNode := parseNode(value)
 	backupArray, err := mod.Node.GetArray()
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	array := make([]*Node, len(backupArray))
@@ -91,20 +91,26 @@ func (m *Manager) insert(path string, index int, value interface{}) {
 	//     throw;
 	// }
 
-	m.source.setConfig(jsonConfig)
+	err = m.source.setConfig(jsonConfig)
+	if err != nil {
+		return err
+	}
+
 	m.updateModifiables()
+
+	return nil
 }
 
-func (m *Manager) remove(path string, index int) {
+func (m *Manager) remove(path string, index int) error {
 	mod, err := m.findModifiable(Removable, path)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	jsonConfig := m.source.getConfigObject()
 	ok := jsonRemoveByPath(jsonConfig, path, index)
 	if !ok {
-		panic("should be there!")
+		return  errors.New("could not remove")
 	}
 
 	// err = validate(jsonConfig, m.source.getSchema())
@@ -114,7 +120,7 @@ func (m *Manager) remove(path string, index int) {
 
 	backupArray, err := mod.Node.GetArray()
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	array := make([]*Node, len(backupArray))
@@ -133,20 +139,26 @@ func (m *Manager) remove(path string, index int) {
 	//     throw;
 	// }
 
-	m.source.setConfig(jsonConfig)
+	err = m.source.setConfig(jsonConfig)
+	if err != nil {
+		return err
+	}
+
 	m.updateModifiables()
+
+	return nil
 }
 
-func (m *Manager) replace(path string, value interface{}) {
+func (m *Manager) replace(path string, value interface{}) error {
 	mod, err := m.findModifiable(Replacable, path)
 	if err != nil {
-		panic(err)
+		return  err
 	}
 
 	jsonConfig := m.source.getConfigObject()
 	ok := jsonSetByPath(jsonConfig, path, value)
 	if !ok {
-		panic("should be there!")
+        return  errors.New("could not set")
 	}
 
 	// err = validate(jsonConfig, m.source.getSchema())
@@ -168,8 +180,14 @@ func (m *Manager) replace(path string, value interface{}) {
 	//     throw;
 	// }
 
-	m.source.setConfig(jsonConfig)
+    err = m.source.setConfig(jsonConfig)
+	if err != nil {
+		return err
+	}
+
 	m.updateModifiables()
+
+    return nil
 }
 
 func (m *Manager) OnInsert(node *Node, handler handler_t) error {

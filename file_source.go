@@ -56,23 +56,25 @@ func (fs *FileSource) getSchema() *string {
 	return &fs.schema
 }
 
-func (fs *FileSource) setConfig(conf *orderedmap.OrderedMap) {
+func (fs *FileSource) setConfig(conf *orderedmap.OrderedMap) error {
 	configBytes, err := json.MarshalIndent(conf, "", "  ")
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	c := string(configBytes)
 	err = validate(&c, &fs.schema)
 	if err != nil {
-		panic("should be there!")
+		return err
 	}
 
 	err = os.WriteFile(fs.configPath, configBytes, os.ModePerm)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	fs.configObject = conf
 	fs.config = string(configBytes)
+
+    return nil
 }
