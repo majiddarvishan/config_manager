@@ -3,7 +3,6 @@ package config
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 )
 
@@ -123,16 +122,25 @@ func (m *Manager) remove(path string, index int) error {
 		return err
 	}
 
-	jsonConfig := m.source.getConfigObject()
+	// jsonConfig := m.source.getConfigObject()
+	jsonConfig := Clone(m.source.getConfigObject())
 	ok := jsonRemoveByPath(jsonConfig, path, index)
 	if !ok {
 		return errors.New("could not remove")
 	}
 
-	// err = validate(jsonConfig, m.source.getSchema())
-	// if err != nil {
-	// 	panic("should be there!")
-	// }
+	{
+		configBytes, err := json.MarshalIndent(jsonConfig, "", "  ")
+		if err != nil {
+			return err
+		}
+
+		c := string(configBytes)
+		err = validate(&c, m.source.getSchema())
+		if err != nil {
+			return err
+		}
+	}
 
 	backupArray, err := mod.Node.GetArray()
 	if err != nil {
@@ -171,16 +179,25 @@ func (m *Manager) replace(path string, value interface{}) error {
 		return err
 	}
 
-	jsonConfig := m.source.getConfigObject()
+	// jsonConfig := m.source.getConfigObject()
+	jsonConfig := Clone(m.source.getConfigObject())
 	ok := jsonSetByPath(jsonConfig, path, value)
 	if !ok {
 		return errors.New("could not set")
 	}
 
-	// err = validate(jsonConfig, m.source.getSchema())
-	// if err != nil {
-	// 	panic("should be there!")
-	// }
+	{
+		configBytes, err := json.MarshalIndent(jsonConfig, "", "  ")
+		if err != nil {
+			return err
+		}
+
+		c := string(configBytes)
+		err = validate(&c, m.source.getSchema())
+		if err != nil {
+			return err
+		}
+	}
 
 	newNode := parseNode(value)
 	// backupNode := *mod.Node
