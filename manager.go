@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 )
 
@@ -59,7 +60,8 @@ func (m *Manager) insert(path string, index int, value interface{}) error {
 		return err
 	}
 
-	jsonConfig := m.source.getConfigObject()
+	// jsonConfig := m.source.getConfigObject()
+	jsonConfig := Clone(m.source.getConfigObject())
 	ok := jsonInsertByPath(jsonConfig, path, index, value)
 	if !ok {
 		return errors.New("could not insert")
@@ -76,7 +78,6 @@ func (m *Manager) insert(path string, index int, value interface{}) error {
 		if err != nil {
 			return err
 		}
-
 	}
 
 	// err = validate(jsonConfig, m.source.getSchema())

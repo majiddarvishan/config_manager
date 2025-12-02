@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -88,8 +89,8 @@ func jsonRemoveByPath(jsonMap *orderedmap.OrderedMap, path string, index int) bo
 	}
 
 	if index >= len(found_list.([]interface{})) {
-		fmt.Println("Index is out of bounds")
-        return false
+		// fmt.Println("Index is out of bounds")
+		return false
 	}
 
 	found_list = append(found_list.([]interface{})[:index], found_list.([]interface{})[index+1:]...)
@@ -138,7 +139,8 @@ func jsonInsertByPath(jsonMap *orderedmap.OrderedMap, path string, index int, va
 	}
 
 	if index > len(found_list.([]interface{})) {
-		panic("Index is out of bounds")
+		// fmt.Println("Index is out of bounds")
+		return false
 	}
 
 	found_list = append(found_list.([]interface{})[:index], append([]interface{}{value}, found_list.([]interface{})[index:]...)...)
@@ -250,4 +252,21 @@ func parseNode(value any) *Node {
 	}
 
 	return node
+}
+
+// Serialize + deserialize to deep copy values
+func Clone(om *orderedmap.OrderedMap) *orderedmap.OrderedMap {
+    data, err := json.Marshal(om)
+	if err != nil {
+        fmt.Println(err)
+		return nil
+	}
+
+    clone := orderedmap.New()
+	if err := json.Unmarshal(data, &clone); err != nil {
+		fmt.Println(err)
+		return nil
+	}
+
+	return clone
 }

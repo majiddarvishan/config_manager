@@ -149,10 +149,16 @@ func (hs *http_server) onPost(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		hs.manager.remove(path, idx)
+		if err := hs.manager.remove(path, idx); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 
 	case "replace":
-		hs.manager.replace(path, value)
+		if err := hs.manager.replace(path, value); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 
 	default:
 		writeError(w, http.StatusBadRequest, "unsupported operation")
