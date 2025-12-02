@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"sync"
 )
 
 type handler_t func(*Node)
@@ -24,6 +25,8 @@ type modifiable struct {
 }
 
 type Manager struct {
+	mu sync.RWMutex
+
 	source      ISource
 	config      *Node
 	modifiables []modifiable

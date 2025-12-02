@@ -82,7 +82,11 @@ func (hs *http_server) onGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hs.latestConfigState(w)
+	hs.manager.mu.RLock()
+	data := hs.buildConfigStateUnsafe() // called while RLock held
+	hs.manager.mu.RUnlock()
+
+	writeSuccess(w, data)
 }
 
 func (hs *http_server) onPost(w http.ResponseWriter, r *http.Request) {
@@ -118,12 +122,15 @@ func (hs *http_server) onPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	value, _ := bodyJSON.Get("value")
-
 	configHash, err := getString(bodyJSON, "config_hash")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	// Acquire write lock to ensure atomic check-and-update
+	hs.manager.mu.Lock()
+	defer hs.manager.mu.Unlock()
 
 	currentHash := HashSHA256(*(hs.manager.source.getConfig()))
 	if configHash != currentHash {
@@ -165,14 +172,16 @@ func (hs *http_server) onPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hs.latestConfigState(w)
+	// build and return the new state while still holding the write lock to ensure consistency
+	data := hs.buildConfigStateUnsafe()
+	writeSuccess(w, data)
 }
 
 func (hs *http_server) onOptions(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, X-API-Key")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	writeSuccess(w, orderedmap.New()) // returns success: true
+	writeSuccess(w, orderedmap.New()) // returns success: true with empty data
 }
 
 func (hs *http_server) check_access(r *http.Request) bool {
@@ -184,12 +193,21 @@ func HashSHA256(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (hs *http_server) latestConfigState(w http.ResponseWriter) {
+/* ------------------ Config State Builder ------------------ */
+
+/*
+buildConfigStateUnsafe builds the response data object (not wrapped in success/error).
+**IMPORTANT**: this function does not take any locks. Callers MUST hold either
+a read lock (RLock) or a write lock (Lock) on hs.manager.mu before calling.
+*/
+func (hs *http_server) buildConfigStateUnsafe() *orderedmap.OrderedMap {
 	confJSON := orderedmap.New()
 	schemaJSON := orderedmap.New()
 
-	json.Unmarshal([]byte(*(hs.manager.source.getConfig())), &confJSON)
-	json.Unmarshal([]byte(*(hs.manager.source.getSchema())), &schemaJSON)
+	// ignore unmarshal errors here; if underlying config/schema are invalid JSON,
+	// best-effort to return whatever we can.
+	_ = json.Unmarshal([]byte(*(hs.manager.source.getConfig())), &confJSON)
+	_ = json.Unmarshal([]byte(*(hs.manager.source.getSchema())), &schemaJSON)
 
 	modPaths := orderedmap.New()
 	modPaths.Set("insertable", hs.manager.getInsertablePaths())
@@ -202,7 +220,7 @@ func (hs *http_server) latestConfigState(w http.ResponseWriter) {
 	data.Set("schema", schemaJSON)
 	data.Set("config_hash", HashSHA256(*(hs.manager.source.getConfig())))
 
-	writeSuccess(w, data)
+	return data
 }
 
 /* ------------------ Unified Response Helpers ------------------ */
