@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"log"
 )
@@ -55,13 +56,27 @@ func (m *Manager) Source() ISource {
 func (m *Manager) insert(path string, index int, value interface{}) error {
 	mod, err := m.findModifiable(Insertable, path)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	jsonConfig := m.source.getConfigObject()
 	ok := jsonInsertByPath(jsonConfig, path, index, value)
 	if !ok {
 		return errors.New("could not insert")
+	}
+
+	{
+		configBytes, err := json.MarshalIndent(jsonConfig, "", "  ")
+		if err != nil {
+			return err
+		}
+
+		c := string(configBytes)
+		err = validate(&c, m.source.getSchema())
+		if err != nil {
+			return err
+		}
+
 	}
 
 	// err = validate(jsonConfig, m.source.getSchema())
@@ -110,7 +125,7 @@ func (m *Manager) remove(path string, index int) error {
 	jsonConfig := m.source.getConfigObject()
 	ok := jsonRemoveByPath(jsonConfig, path, index)
 	if !ok {
-		return  errors.New("could not remove")
+		return errors.New("could not remove")
 	}
 
 	// err = validate(jsonConfig, m.source.getSchema())
@@ -152,13 +167,13 @@ func (m *Manager) remove(path string, index int) error {
 func (m *Manager) replace(path string, value interface{}) error {
 	mod, err := m.findModifiable(Replacable, path)
 	if err != nil {
-		return  err
+		return err
 	}
 
 	jsonConfig := m.source.getConfigObject()
 	ok := jsonSetByPath(jsonConfig, path, value)
 	if !ok {
-        return  errors.New("could not set")
+		return errors.New("could not set")
 	}
 
 	// err = validate(jsonConfig, m.source.getSchema())
@@ -180,14 +195,14 @@ func (m *Manager) replace(path string, value interface{}) error {
 	//     throw;
 	// }
 
-    err = m.source.setConfig(jsonConfig)
+	err = m.source.setConfig(jsonConfig)
 	if err != nil {
 		return err
 	}
 
 	m.updateModifiables()
 
-    return nil
+	return nil
 }
 
 func (m *Manager) OnInsert(node *Node, handler handler_t) error {

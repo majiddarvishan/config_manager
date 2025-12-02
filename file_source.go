@@ -62,12 +62,6 @@ func (fs *FileSource) setConfig(conf *orderedmap.OrderedMap) error {
 		return err
 	}
 
-	c := string(configBytes)
-	err = validate(&c, &fs.schema)
-	if err != nil {
-		return err
-	}
-
 	err = os.WriteFile(fs.configPath, configBytes, os.ModePerm)
 	if err != nil {
 		return err

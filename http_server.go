@@ -181,7 +181,14 @@ func (hs *http_server) on_post_request(w http.ResponseWriter, r *http.Request) {
 		}
 		var index = int(val.(float64))
 
-		hs.manager.insert(path, index, value)
+		err := hs.manager.insert(path, index, value)
+        if err != nil {
+            w.Header().Set("access_control_allow_origin", "*")
+			w.Header().Set("content_type", "text/html")
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, err.Error())
+			return
+        }
 	} else if op == "remove" {
 		val, present = body_json.Get("index")
 		if !present {
