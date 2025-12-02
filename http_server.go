@@ -52,7 +52,7 @@ func (hs *http_server) Start() {
 
 	handler := cors.New(cors.Options{
 		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
 		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-API-Key"},
 		AllowCredentials: true,
 	}).Handler(mux)
@@ -82,9 +82,8 @@ func (hs *http_server) onGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hs.manager.mu.RLock()
-	data := hs.buildConfigStateUnsafe() // called while RLock held
-	hs.manager.mu.RUnlock()
+	// Manager handles locking internally
+	data := hs.buildConfigState()
 
 	writeSuccess(w, data)
 }
@@ -105,7 +104,7 @@ func (hs *http_server) onPost(w http.ResponseWriter, r *http.Request) {
 
 	var bodyJSON = orderedmap.New()
 	if err := json.Unmarshal(body, &bodyJSON); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("could not parse JSON: %s", err))
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %s", err))
 		return
 	}
 
@@ -128,16 +127,14 @@ func (hs *http_server) onPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Acquire write lock to ensure atomic check-and-update
-	hs.manager.mu.Lock()
-	defer hs.manager.mu.Unlock()
-
+	// Verify hash BEFORE making modifications (manager has its own locks)
 	currentHash := HashSHA256(*(hs.manager.source.getConfig()))
 	if configHash != currentHash {
-		writeError(w, http.StatusConflict, "config hash mismatch: config was modified elsewhere")
+		writeError(w, http.StatusConflict, "config hash mismatch: config changed elsewhere")
 		return
 	}
 
+	// Execute operation (manager internally locks)
 	switch op {
 	case "insert":
 		idx, err := getIndex(bodyJSON)
@@ -172,8 +169,8 @@ func (hs *http_server) onPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// build and return the new state while still holding the write lock to ensure consistency
-	data := hs.buildConfigStateUnsafe()
+	// Return updated config
+	data := hs.buildConfigState()
 	writeSuccess(w, data)
 }
 
@@ -181,7 +178,7 @@ func (hs *http_server) onOptions(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, X-API-Key")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	writeSuccess(w, orderedmap.New()) // returns success: true with empty data
+	writeSuccess(w, orderedmap.New())
 }
 
 func (hs *http_server) check_access(r *http.Request) bool {
@@ -193,19 +190,13 @@ func HashSHA256(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-/* ------------------ Config State Builder ------------------ */
+/* ------------------ Build Config State ------------------ */
 
-/*
-buildConfigStateUnsafe builds the response data object (not wrapped in success/error).
-**IMPORTANT**: this function does not take any locks. Callers MUST hold either
-a read lock (RLock) or a write lock (Lock) on hs.manager.mu before calling.
-*/
-func (hs *http_server) buildConfigStateUnsafe() *orderedmap.OrderedMap {
+func (hs *http_server) buildConfigState() *orderedmap.OrderedMap {
+	// Manager locks internally during these calls
 	confJSON := orderedmap.New()
 	schemaJSON := orderedmap.New()
 
-	// ignore unmarshal errors here; if underlying config/schema are invalid JSON,
-	// best-effort to return whatever we can.
 	_ = json.Unmarshal([]byte(*(hs.manager.source.getConfig())), &confJSON)
 	_ = json.Unmarshal([]byte(*(hs.manager.source.getSchema())), &schemaJSON)
 
@@ -223,7 +214,7 @@ func (hs *http_server) buildConfigStateUnsafe() *orderedmap.OrderedMap {
 	return data
 }
 
-/* ------------------ Unified Response Helpers ------------------ */
+/* ------------------ Unified JSON Response Helpers ------------------ */
 
 func writeError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -261,12 +252,10 @@ func getString(m *orderedmap.OrderedMap, key string) (string, error) {
 	if !present {
 		return "", fmt.Errorf("%s is missing", key)
 	}
-
 	s, ok := val.(string)
 	if !ok {
 		return "", fmt.Errorf("%s must be a string", key)
 	}
-
 	return s, nil
 }
 
