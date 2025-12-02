@@ -24,20 +24,17 @@ type http_server struct {
 func NewHttpServer(m *Manager, conf *Node) *http_server {
 	hs := &http_server{manager: m}
 
-	addrNode, err := conf.At("address")
-	if err == nil {
+	if addrNode, err := conf.At("address"); err == nil {
 		hs.address, _ = addrNode.GetString()
 	}
 
-	portNode, err := conf.At("port")
-	if err == nil {
+	if portNode, err := conf.At("port"); err == nil {
 		if v, _ := portNode.GetInt(); v > 0 {
 			hs.port = v
 		}
 	}
 
-	keyNode, err := conf.At("api_key")
-	if err == nil {
+	if keyNode, err := conf.At("api_key"); err == nil {
 		hs.api_key, _ = keyNode.GetString()
 	}
 
@@ -54,7 +51,7 @@ func (hs *http_server) Start() {
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
 		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-API-Key"},
-		AllowCredentials: true,
+		AllowCredentials: false,
 	}).Handler(mux)
 
 	if err := http.ListenAndServe(addr, handler); err != nil {
@@ -76,20 +73,28 @@ func (hs *http_server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// GET
+////////////////////////////////////////////////////////////////////////////////
+
 func (hs *http_server) onGet(w http.ResponseWriter, r *http.Request) {
-	if !hs.check_access(r) {
+	if !hs.checkAccess(r) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 
-	// Manager handles locking internally
+	// Manager locks internally
 	data := hs.buildConfigState()
 
 	writeSuccess(w, data)
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// POST
+////////////////////////////////////////////////////////////////////////////////
+
 func (hs *http_server) onPost(w http.ResponseWriter, r *http.Request) {
-	if !hs.check_access(r) {
+	if !hs.checkAccess(r) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -121,39 +126,40 @@ func (hs *http_server) onPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	value, _ := bodyJSON.Get("value")
+
 	configHash, err := getString(bodyJSON, "config_hash")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	// Verify hash BEFORE making modifications (manager has its own locks)
-	currentHash := HashSHA256(*(hs.manager.source.getConfig()))
-	if configHash != currentHash {
-		writeError(w, http.StatusConflict, "config hash mismatch: config changed elsewhere")
+	// Validate config hash BEFORE modification
+	currentHash := HashSHA256(*(hs.manager.Source().getConfig()))
+	if currentHash != configHash {
+		writeError(w, http.StatusConflict, "config hash mismatch: config changed by someone else")
 		return
 	}
 
-	// Execute operation (manager internally locks)
+	// Execute operation (Manager locks internally)
 	switch op {
 	case "insert":
-		idx, err := getIndex(bodyJSON)
+		index, err := getIndex(bodyJSON)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if err := hs.manager.insert(path, idx, value); err != nil {
+		if err := hs.manager.insert(path, index, value); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
 	case "remove":
-		idx, err := getIndex(bodyJSON)
+		index, err := getIndex(bodyJSON)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if err := hs.manager.remove(path, idx); err != nil {
+		if err := hs.manager.remove(path, index); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -169,10 +175,14 @@ func (hs *http_server) onPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return updated config
+	// Build updated config for response
 	data := hs.buildConfigState()
 	writeSuccess(w, data)
 }
+
+////////////////////////////////////////////////////////////////////////////////
+// OPTIONS
+////////////////////////////////////////////////////////////////////////////////
 
 func (hs *http_server) onOptions(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -181,40 +191,39 @@ func (hs *http_server) onOptions(w http.ResponseWriter) {
 	writeSuccess(w, orderedmap.New())
 }
 
-func (hs *http_server) check_access(r *http.Request) bool {
-	return r.Header.Get("X-API-Key") == hs.api_key
+////////////////////////////////////////////////////////////////////////////////
+// BUILD CONFIG STATE
+////////////////////////////////////////////////////////////////////////////////
+
+func (hs *http_server) buildConfigState() *orderedmap.OrderedMap {
+	confJSON := orderedmap.New()
+	schemaJSON := orderedmap.New()
+
+	_ = json.Unmarshal([]byte(*(hs.manager.Source().getConfig())), &confJSON)
+	_ = json.Unmarshal([]byte(*(hs.manager.Source().getSchema())), &schemaJSON)
+
+	paths := orderedmap.New()
+	paths.Set("insertable", hs.manager.getInsertablePaths())
+	paths.Set("removable", hs.manager.getRemovablePaths())
+	paths.Set("replaceable", hs.manager.getReplaceablePaths())
+
+	out := orderedmap.New()
+	out.Set("modifiable_paths", paths)
+	out.Set("config", confJSON)
+	out.Set("schema", schemaJSON)
+	out.Set("config_hash", HashSHA256(*(hs.manager.Source().getConfig())))
+
+	return out
 }
+
+////////////////////////////////////////////////////////////////////////////////
+// HELPERS
+////////////////////////////////////////////////////////////////////////////////
 
 func HashSHA256(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
 }
-
-/* ------------------ Build Config State ------------------ */
-
-func (hs *http_server) buildConfigState() *orderedmap.OrderedMap {
-	// Manager locks internally during these calls
-	confJSON := orderedmap.New()
-	schemaJSON := orderedmap.New()
-
-	_ = json.Unmarshal([]byte(*(hs.manager.source.getConfig())), &confJSON)
-	_ = json.Unmarshal([]byte(*(hs.manager.source.getSchema())), &schemaJSON)
-
-	modPaths := orderedmap.New()
-	modPaths.Set("insertable", hs.manager.getInsertablePaths())
-	modPaths.Set("removable", hs.manager.getRemovablePaths())
-	modPaths.Set("replaceable", hs.manager.getReplaceablePaths())
-
-	data := orderedmap.New()
-	data.Set("modifiable_paths", modPaths)
-	data.Set("config", confJSON)
-	data.Set("schema", schemaJSON)
-	data.Set("config_hash", HashSHA256(*(hs.manager.source.getConfig())))
-
-	return data
-}
-
-/* ------------------ Unified JSON Response Helpers ------------------ */
 
 func writeError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -245,30 +254,30 @@ func writeSuccess(w http.ResponseWriter, data *orderedmap.OrderedMap) {
 	w.Write(out)
 }
 
-/* ------------------ JSON Extract Helpers ------------------ */
-
 func getString(m *orderedmap.OrderedMap, key string) (string, error) {
-	val, present := m.Get(key)
-	if !present {
-		return "", fmt.Errorf("%s is missing", key)
-	}
-	s, ok := val.(string)
+	v, ok := m.Get(key)
 	if !ok {
-		return "", fmt.Errorf("%s must be a string", key)
+		return "", fmt.Errorf("%s missing", key)
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", fmt.Errorf("%s must be string", key)
 	}
 	return s, nil
 }
 
 func getIndex(m *orderedmap.OrderedMap) (int, error) {
-	val, present := m.Get("index")
-	if !present {
-		return 0, fmt.Errorf("index is missing")
+	val, ok := m.Get("index")
+	if !ok {
+		return 0, fmt.Errorf("index missing")
 	}
-
 	f, ok := val.(float64)
 	if !ok {
-		return 0, fmt.Errorf("index must be a number")
+		return 0, fmt.Errorf("index must be number")
 	}
-
 	return int(f), nil
+}
+
+func (hs *http_server) checkAccess(r *http.Request) bool {
+	return r.Header.Get("X-API-Key") == hs.api_key
 }
