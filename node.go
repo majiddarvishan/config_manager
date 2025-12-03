@@ -2,7 +2,7 @@ package config
 
 import (
 	"errors"
-	"strconv"
+	"fmt"
 )
 
 type Node struct {
@@ -22,12 +22,18 @@ const (
 )
 
 func (n *Node) Type() NodeType {
+	if n == nil {
+		return Null
+	}
+
 	switch n.value.(type) {
 	case nil:
 		return Null
 	case bool:
 		return Boolean
 	case int64:
+		return Integral
+	case int:
 		return Integral
 	case float64:
 		return FloatingPoint
@@ -43,116 +49,77 @@ func (n *Node) Type() NodeType {
 }
 
 func (n *Node) get() (interface{}, error) {
+	if n == nil {
+		return nil, errors.New("node is nil")
+	}
+
 	switch v := n.value.(type) {
-	case string:
-		return v, nil
-	case bool:
-		return v, nil
-		// case int64:
-	//     return v, nil
-	case int:
-		return v, nil
-	case float64:
+	case string, bool, int, int64, float64:
 		return v, nil
 	case map[string]*Node:
 		return v, nil
 	case []*Node:
 		return v, nil
+	case nil:
+		return nil, errors.New("node value is nil")
 	default:
-		return nil, errors.New("node is not a valid type")
+		return nil, fmt.Errorf("node has invalid type: %T", v)
 	}
 }
 
-// func (n *Node) Get2[T any](param ...string) (string, error) {
-//     var tmp T
-
-//     if reflect.TypeOf(tmp).Kind() == string {
-//         return n.GetString(param)
-//     }
-
-//     // switch v := tmp.(type) {
-// 	// case string:
-// 	// 	return GetString(param)
-// 	// case bool:
-// 	// 	return v, nil
-// 	// // case int64:
-//     // //     return v, nil
-//     // case int:
-// 	// 	return v, nil
-// 	// case float64:
-// 	// 	return v, nil
-// 	// case map[string]*Node:
-// 	// 	return v, nil
-// 	// case []*Node:
-// 	// 	return v, nil
-// 	// default:
-// 	// 	return nil, errors.New("Node is not a valid type")
-// 	// }
-
-//     return "", errors.New("Node is not a valid type")
-// }
-
 func (n *Node) GetString(param ...string) (string, error) {
 	if len(param) > 1 {
-		return "", errors.New("please input one argument")
+		return "", errors.New("too many arguments: expected 0 or 1")
 	}
 	if len(param) == 1 {
 		sn, err := n.atString(param[0])
 		if err != nil {
 			return "", err
 		}
-
 		return sn.getString()
 	}
-
 	return n.getString()
 }
 
 func (n *Node) GetBool(param ...string) (bool, error) {
 	if len(param) > 1 {
-		return false, errors.New("please input one argument")
+		return false, errors.New("too many arguments: expected 0 or 1")
 	}
 	if len(param) == 1 {
 		sn, err := n.atString(param[0])
 		if err != nil {
 			return false, err
 		}
-
 		return sn.getBool()
 	}
-
 	return n.getBool()
 }
 
 func (n *Node) GetInt(param ...string) (int, error) {
 	if len(param) > 1 {
-		return 0, errors.New("please input one argument")
+		return 0, errors.New("too many arguments: expected 0 or 1")
 	}
 	if len(param) == 1 {
 		sn, err := n.atString(param[0])
 		if err != nil {
 			return 0, err
 		}
-
 		return sn.getInt()
 	}
-
 	return n.getInt()
 }
 
 func (n *Node) GetFloat(param ...string) (float64, error) {
 	if len(param) > 1 {
-		return 0, errors.New("please input one argument")
+		return 0, errors.New("too many arguments: expected 0 or 1")
 	}
 	if len(param) == 1 {
 		sn, err := n.atString(param[0])
 		if err != nil {
 			return 0, err
 		}
-
 		return sn.getFloat()
 	}
-
 	return n.getFloat()
 }
 
@@ -161,10 +128,11 @@ func (n *Node) getString() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if str, ok := value.(string); ok {
-		return str, nil
+	str, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("node is %T, not string", value)
 	}
-	return "", errors.New("node is not string")
+	return str, nil
 }
 
 func (n *Node) getBool() (bool, error) {
@@ -172,10 +140,11 @@ func (n *Node) getBool() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if b, ok := value.(bool); ok {
-		return b, nil
+	b, ok := value.(bool)
+	if !ok {
+		return false, fmt.Errorf("node is %T, not bool", value)
 	}
-	return false, errors.New("node is not boolean")
+	return b, nil
 }
 
 func (n *Node) getInt() (int, error) {
@@ -184,10 +153,17 @@ func (n *Node) getInt() (int, error) {
 		return 0, err
 	}
 
-	if i, ok := value.(float64); ok {
-		return int(i), nil
+	// Handle both int and float64 (JSON numbers are float64)
+	switch v := value.(type) {
+	case int:
+		return v, nil
+	case int64:
+		return int(v), nil
+	case float64:
+		return int(v), nil
+	default:
+		return 0, fmt.Errorf("node is %T, not numeric", value)
 	}
-	return 0, errors.New("node is not integral")
 }
 
 func (n *Node) getFloat() (float64, error) {
@@ -195,10 +171,17 @@ func (n *Node) getFloat() (float64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if f, ok := value.(float64); ok {
-		return f, nil
+
+	switch v := value.(type) {
+	case float64:
+		return v, nil
+	case int:
+		return float64(v), nil
+	case int64:
+		return float64(v), nil
+	default:
+		return 0, fmt.Errorf("node is %T, not numeric", value)
 	}
-	return 0, errors.New("node is not floating")
 }
 
 func (n *Node) GetObject() (map[string]*Node, error) {
@@ -206,10 +189,11 @@ func (n *Node) GetObject() (map[string]*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	if obj, ok := value.(map[string]*Node); ok {
-		return obj, nil
+	obj, ok := value.(map[string]*Node)
+	if !ok {
+		return nil, fmt.Errorf("node is %T, not object", value)
 	}
-	return nil, errors.New("node is not object")
+	return obj, nil
 }
 
 func (n *Node) GetArray() ([]*Node, error) {
@@ -217,41 +201,82 @@ func (n *Node) GetArray() ([]*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	if arr, ok := value.([]*Node); ok {
-		return arr, nil
+	arr, ok := value.([]*Node)
+	if !ok {
+		return nil, fmt.Errorf("node is %T, not array", value)
 	}
-	return nil, errors.New("node is not array")
+	return arr, nil
 }
 
 func (n *Node) atString(key string) (*Node, error) {
+	if n == nil {
+		return nil, errors.New("node is nil")
+	}
+
 	object, ok := n.value.(map[string]*Node)
 	if !ok {
-		return nil, errors.New("cannot call at(key) on non object nodes")
+		return nil, fmt.Errorf("cannot call At(key) on non-object node (type: %v)", n.Type())
 	}
+
 	value, ok := object[key]
 	if !ok {
-		return nil, errors.New("cannot find key `" + key + "` in object Node")
+		return nil, fmt.Errorf("key '%s' not found in object", key)
 	}
+
 	return value, nil
 }
 
 func (n *Node) atInt(index int) (*Node, error) {
+	if n == nil {
+		return nil, errors.New("node is nil")
+	}
+
 	array, ok := n.value.([]*Node)
 	if !ok {
-		return nil, errors.New("cannot call at(index) on non array nodes")
+		return nil, fmt.Errorf("cannot call At(index) on non-array node (type: %v)", n.Type())
 	}
-	if index >= len(array) {
-		return nil, errors.New("cannot find index `" + strconv.Itoa(index) + "` in array Node")
+
+	if index < 0 || index >= len(array) {
+		return nil, fmt.Errorf("index %d out of bounds [0,%d)", index, len(array))
 	}
+
 	return array[index], nil
 }
 
 func (n *Node) At(param interface{}) (*Node, error) {
-	if _, ok := param.(int); ok {
-		return n.atInt(param.(int))
-	} else if _, ok := param.(string); ok {
-		return n.atString(param.(string))
+	switch v := param.(type) {
+	case int:
+		return n.atInt(v)
+	case string:
+		return n.atString(v)
+	default:
+		return nil, fmt.Errorf("param must be int or string, got %T", param)
+	}
+}
+
+// DeepCopy creates a deep copy of the node tree
+func (n *Node) DeepCopy() *Node {
+	if n == nil {
+		return nil
 	}
 
-	return nil, errors.New("param not int or string")
+	switch v := n.value.(type) {
+	case map[string]*Node:
+		objCopy := make(map[string]*Node, len(v))
+		for key, node := range v {
+			objCopy[key] = node.DeepCopy()
+		}
+		return &Node{value: objCopy}
+
+	case []*Node:
+		arrCopy := make([]*Node, len(v))
+		for i, node := range v {
+			arrCopy[i] = node.DeepCopy()
+		}
+		return &Node{value: arrCopy}
+
+	default:
+		// Primitive types are safe to copy directly
+		return &Node{value: v}
+	}
 }

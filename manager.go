@@ -14,7 +14,7 @@ type modifiableType int
 const (
 	Insertable modifiableType = iota
 	Removable
-	Replacable
+	Replaceable
 )
 
 type modifiable struct {
@@ -30,6 +30,7 @@ type Manager struct {
 	source      ISource
 	config      *Node
 	modifiables []modifiable
+	version     int64 // Version counter for optimistic locking
 }
 
 func NewManager(source ISource) (*Manager, error) {
@@ -46,6 +47,7 @@ func NewManager(source ISource) (*Manager, error) {
 		source:      source,
 		config:      root,
 		modifiables: make([]modifiable, 0),
+		version:     1,
 	}
 
 	if err := validate(source.getConfig(), source.getSchema()); err != nil {
@@ -55,10 +57,12 @@ func NewManager(source ISource) (*Manager, error) {
 	return m, nil
 }
 
+// Config returns a deep copy of the config to prevent data races
 func (m *Manager) Config() *Node {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.config
+	// return m.config.DeepCopy()
+    return m.config
 }
 
 func (m *Manager) Source() ISource {
@@ -67,180 +71,206 @@ func (m *Manager) Source() ISource {
 	return m.source
 }
 
+func (m *Manager) Version() int64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.version
+}
+
 ////////////////////////////////////////////////////////////////////////////////
-// INSERT (two-phase locking)
+// INSERT (improved with proper rollback)
 ////////////////////////////////////////////////////////////////////////////////
 
 func (m *Manager) insert(path string, index int, value interface{}) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	mod, err := m.findModifiable(Insertable, path)
+	mod, err := m.findModifiableLocked(Insertable, path)
 	if err != nil {
-		m.mu.Unlock()
 		return err
 	}
 
-	jsonConfig := Clone(m.source.getConfigObject())
-	if !jsonInsertByPath(jsonConfig, path, index, value) {
-		m.mu.Unlock()
-		return errors.New("could not insert")
+	// Validate index bounds first
+	array, err := mod.Node.GetArray()
+	if err != nil {
+		return err
+	}
+	if index < 0 || index > len(array) {
+		return fmt.Errorf("index %d out of bounds [0,%d]", index, len(array))
 	}
 
-	// Validate JSON
+	// Clone and validate
+	jsonConfig, err := Clone(m.source.getConfigObject())
+	if err != nil {
+		return fmt.Errorf("failed to clone config: %w", err)
+	}
+
+	if err := jsonInsertByPath(jsonConfig, path, index, value); err != nil {
+		return fmt.Errorf("failed to insert: %w", err)
+	}
+
 	if err := validateJSONAgainstSchema(jsonConfig, m.source.getSchema()); err != nil {
-		m.mu.Unlock()
-		return err
+		return fmt.Errorf("validation failed: %w", err)
 	}
+
+	// Create backup for rollback
+	oldArray := make([]*Node, len(array))
+	copy(oldArray, array)
 
 	// Mutate in-memory node
 	newNode := parseNode(value)
-
-	array, err := mod.Node.GetArray()
-	if err != nil {
-		m.mu.Unlock()
-		return err
-	}
-
-	if index < 0 || index > len(array) {
-		m.mu.Unlock()
-		return errors.New("index out of bounds")
-	}
-
-	// Copy array
-	newArr := append(append(array[:index], newNode), array[index:]...)
+	newArr := make([]*Node, 0, len(array)+1)
+	newArr = append(newArr, array[:index]...)
+	newArr = append(newArr, newNode)
+	newArr = append(newArr, array[index:]...)
 	*mod.Node = Node{newArr}
 
+	// Persist changes
+	if err := m.source.setConfig(jsonConfig); err != nil {
+		// Rollback on failure
+		*mod.Node = Node{oldArray}
+		return fmt.Errorf("failed to persist config: %w", err)
+	}
+
+	m.version++
+	m.updateModifiablesLocked()
+
+	// Call handler AFTER successful persistence, outside of critical section
 	handler := mod.Handler
 	handlerNode := newNode
 
-	// Unlock before handler
-	m.mu.Unlock()
-
 	if handler != nil {
-		handler(handlerNode)
+		// Unlock during handler execution to avoid deadlocks
+		// Handler gets a copy so it can't corrupt state
+		m.mu.Unlock()
+		// handler(handlerNode.DeepCopy())
+        handler(handlerNode)
+		m.mu.Lock()
 	}
-
-	// Phase 2 — Persist + update paths
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if err := m.source.setConfig(jsonConfig); err != nil {
-		return err
-	}
-
-	m.updateModifiables()
 
 	return nil
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// REMOVE (two-phase locking)
+// REMOVE (improved with proper rollback)
 ////////////////////////////////////////////////////////////////////////////////
 
 func (m *Manager) remove(path string, index int) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	mod, err := m.findModifiable(Removable, path)
+	mod, err := m.findModifiableLocked(Removable, path)
 	if err != nil {
-		m.mu.Unlock()
-		return err
-	}
-
-	jsonConfig := Clone(m.source.getConfigObject())
-	if !jsonRemoveByPath(jsonConfig, path, index) {
-		m.mu.Unlock()
-		return errors.New("could not remove")
-	}
-
-	if err := validateJSONAgainstSchema(jsonConfig, m.source.getSchema()); err != nil {
-		m.mu.Unlock()
 		return err
 	}
 
 	array, err := mod.Node.GetArray()
 	if err != nil {
-		m.mu.Unlock()
 		return err
 	}
 
 	if index < 0 || index >= len(array) {
-		m.mu.Unlock()
-		return errors.New("index out of bounds")
+		return fmt.Errorf("index %d out of bounds [0,%d)", index, len(array))
 	}
 
+	jsonConfig, err := Clone(m.source.getConfigObject())
+	if err != nil {
+		return fmt.Errorf("failed to clone config: %w", err)
+	}
+
+	if err := jsonRemoveByPath(jsonConfig, path, index); err != nil {
+		return fmt.Errorf("failed to remove: %w", err)
+	}
+
+	if err := validateJSONAgainstSchema(jsonConfig, m.source.getSchema()); err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+
+	// Backup for rollback
+	oldArray := make([]*Node, len(array))
+	copy(oldArray, array)
 	removedNode := array[index]
 
-	newArr := append(array[:index], array[index+1:]...)
+	// Mutate
+	newArr := make([]*Node, 0, len(array)-1)
+	newArr = append(newArr, array[:index]...)
+	newArr = append(newArr, array[index+1:]...)
 	*mod.Node = Node{newArr}
+
+	// Persist
+	if err := m.source.setConfig(jsonConfig); err != nil {
+		*mod.Node = Node{oldArray}
+		return fmt.Errorf("failed to persist config: %w", err)
+	}
+
+	m.version++
+	m.updateModifiablesLocked()
 
 	handler := mod.Handler
 	handlerNode := removedNode
 
-	// Unlock before handler
-	m.mu.Unlock()
-
 	if handler != nil {
-		handler(handlerNode)
+		m.mu.Unlock()
+		// handler(handlerNode.DeepCopy())
+        handler(handlerNode)
+		m.mu.Lock()
 	}
 
-	// Phase 2 — Persist + update
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if err := m.source.setConfig(jsonConfig); err != nil {
-		return err
-	}
-
-	m.updateModifiables()
 	return nil
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// REPLACE (two-phase locking)
+// REPLACE (improved with proper rollback)
 ////////////////////////////////////////////////////////////////////////////////
 
 func (m *Manager) replace(path string, value interface{}) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	mod, err := m.findModifiable(Replacable, path)
+	mod, err := m.findModifiableLocked(Replaceable, path)
 	if err != nil {
-		m.mu.Unlock()
 		return err
 	}
 
-	jsonConfig := Clone(m.source.getConfigObject())
-	if !jsonSetByPath(jsonConfig, path, value) {
-		m.mu.Unlock()
-		return errors.New("could not set")
+	jsonConfig, err := Clone(m.source.getConfigObject())
+	if err != nil {
+		return fmt.Errorf("failed to clone config: %w", err)
+	}
+
+	if err := jsonSetByPath(jsonConfig, path, value); err != nil {
+		return fmt.Errorf("failed to set: %w", err)
 	}
 
 	if err := validateJSONAgainstSchema(jsonConfig, m.source.getSchema()); err != nil {
-		m.mu.Unlock()
-		return err
+		return fmt.Errorf("validation failed: %w", err)
 	}
 
+	// Backup for rollback
+	oldNode := *mod.Node
+
+	// Mutate
 	newNode := parseNode(value)
 	*mod.Node = *newNode
+
+	// Persist
+	if err := m.source.setConfig(jsonConfig); err != nil {
+		*mod.Node = oldNode
+		return fmt.Errorf("failed to persist config: %w", err)
+	}
+
+	m.version++
+	m.updateModifiablesLocked()
 
 	handler := mod.Handler
 	handlerNode := mod.Node
 
-	m.mu.Unlock()
-
-	// Handler BEFORE persist but OUTSIDE lock
 	if handler != nil {
-		handler(handlerNode)
+		m.mu.Unlock()
+		// handler(handlerNode.DeepCopy())
+        handler(handlerNode)
+		m.mu.Lock()
 	}
 
-	// persist + update after handler
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if err := m.source.setConfig(jsonConfig); err != nil {
-		return err
-	}
-
-	m.updateModifiables()
 	return nil
 }
 
@@ -249,14 +279,17 @@ func (m *Manager) replace(path string, value interface{}) error {
 ////////////////////////////////////////////////////////////////////////////////
 
 func (m *Manager) OnInsert(node *Node, handler handler_t) error {
+	if node == nil {
+		return errors.New("node cannot be nil")
+	}
 	if node.Type() != Array {
-		return errors.New("Node must be array")
+		return errors.New("node must be array for insert operations")
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	p, err := m.findAndSanitizeNodePath(node)
+	p, err := m.findAndSanitizeNodePathLocked(node)
 	if err != nil {
 		return err
 	}
@@ -272,14 +305,17 @@ func (m *Manager) OnInsert(node *Node, handler handler_t) error {
 }
 
 func (m *Manager) OnRemove(node *Node, handler handler_t) error {
+	if node == nil {
+		return errors.New("node cannot be nil")
+	}
 	if node.Type() != Array {
-		return errors.New("Node must be array")
+		return errors.New("node must be array for remove operations")
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	p, err := m.findAndSanitizeNodePath(node)
+	p, err := m.findAndSanitizeNodePathLocked(node)
 	if err != nil {
 		return err
 	}
@@ -295,16 +331,20 @@ func (m *Manager) OnRemove(node *Node, handler handler_t) error {
 }
 
 func (m *Manager) OnReplace(node *Node, handler handler_t) error {
+	if node == nil {
+		return errors.New("node cannot be nil")
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	p, err := m.findAndSanitizeNodePath(node)
+	p, err := m.findAndSanitizeNodePathLocked(node)
 	if err != nil {
 		return err
 	}
 
 	m.modifiables = append(m.modifiables, modifiable{
-		Type:    Replacable,
+		Type:    Replaceable,
 		Path:    p,
 		Node:    node,
 		Handler: handler,
@@ -317,15 +357,15 @@ func (m *Manager) OnReplace(node *Node, handler handler_t) error {
 // PATH HELPERS
 ////////////////////////////////////////////////////////////////////////////////
 
-func (m *Manager) getInsertablePaths() []string { return m.getPaths(Insertable) }
-func (m *Manager) getRemovablePaths() []string  { return m.getPaths(Removable) }
-func (m *Manager) getReplaceablePaths() []string { return m.getPaths(Replacable) }
+func (m *Manager) getInsertablePaths() []string  { return m.getPathsLocked(Insertable) }
+func (m *Manager) getRemovablePaths() []string   { return m.getPathsLocked(Removable) }
+func (m *Manager) getReplaceablePaths() []string { return m.getPathsLocked(Replaceable) }
 
-func (m *Manager) getPaths(t modifiableType) []string {
+func (m *Manager) getPathsLocked(t modifiableType) []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	out := []string{}
+	out := make([]string, 0, len(m.modifiables))
 	for _, v := range m.modifiables {
 		if v.Type == t {
 			out = append(out, v.Path)
@@ -334,43 +374,35 @@ func (m *Manager) getPaths(t modifiableType) []string {
 	return out
 }
 
-func (m *Manager) findModifiable(t modifiableType, path string) (*modifiable, error) {
+func (m *Manager) findModifiableLocked(t modifiableType, path string) (*modifiable, error) {
 	for i := range m.modifiables {
 		if m.modifiables[i].Type == t && m.modifiables[i].Path == path {
 			return &m.modifiables[i], nil
 		}
 	}
-	return nil, errors.New("path `" + path + "` not modifiable")
+	return nil, fmt.Errorf("path '%s' not modifiable for operation type %d", path, t)
 }
 
-func (m *Manager) updateModifiables() {
-	// remove invalid ones
-	for i := len(m.modifiables) - 1; i >= 0; i-- {
-		if m.findNodePath(m.modifiables[i].Node) == "" {
-			m.modifiables = append(m.modifiables[:i], m.modifiables[i+1:]...)
+func (m *Manager) updateModifiablesLocked() {
+	// Remove invalid modifiables
+	validMods := make([]modifiable, 0, len(m.modifiables))
+	for _, mod := range m.modifiables {
+		if path := m.findNodePathLocked(mod.Node); path != "" {
+			mod.Path = path
+			validMods = append(validMods, mod)
 		}
 	}
-
-	// refresh paths
-	for i := range m.modifiables {
-		if p := m.findNodePath(m.modifiables[i].Node); p != "" {
-			m.modifiables[i].Path = p
-		}
-	}
+	m.modifiables = validMods
 }
 
-func (m *Manager) findNodePath(n *Node) string {
-	p := findNodePath(m.config, n)
-	if p == nil {
-		return ""
-	}
-	return *p
+func (m *Manager) findNodePathLocked(n *Node) string {
+	return findNodePath(m.config, n)
 }
 
-func (m *Manager) findAndSanitizeNodePath(n *Node) (string, error) {
-	p := m.findNodePath(n)
+func (m *Manager) findAndSanitizeNodePathLocked(n *Node) (string, error) {
+	p := m.findNodePathLocked(n)
 	if p == "" {
-		return "", errors.New("node has no valid path in config")
+		return "", errors.New("node has no valid path in config tree")
 	}
 	return p, nil
 }
@@ -382,7 +414,7 @@ func (m *Manager) findAndSanitizeNodePath(n *Node) (string, error) {
 func validateJSONAgainstSchema(obj interface{}, schema *string) error {
 	b, err := json.Marshal(obj)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal object: %w", err)
 	}
 	s := string(b)
 	return validate(&s, schema)

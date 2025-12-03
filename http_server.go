@@ -1,49 +1,79 @@
 package config
 
 import (
+	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
-	"os"
+	"time"
 
 	"github.com/iancoleman/orderedmap"
 	"github.com/rs/cors"
 )
 
-type http_server struct {
-	address string
-	port    int
-	api_key string
+const (
+	maxBodySize       = 10 * 1024 * 1024 // 10MB max request body
+	defaultAddress    = "localhost"
+	defaultPort       = 8080
+	shutdownTimeout   = 30 * time.Second
+	readTimeout       = 15 * time.Second
+	writeTimeout      = 15 * time.Second
+	idleTimeout       = 60 * time.Second
+)
 
-	manager *Manager
+type http_server struct {
+	address   string
+	port      int
+	apiKey    string
+	apiKeyHash [32]byte // Store hash for comparison
+	manager   *Manager
+	server    *http.Server
 }
 
-func NewHttpServer(m *Manager, conf *Node) *http_server {
-	hs := &http_server{manager: m}
-
-	if addrNode, err := conf.At("address"); err == nil {
-		hs.address, _ = addrNode.GetString()
+func NewHttpServer(m *Manager, conf *Node) (*http_server, error) {
+	if m == nil {
+		return nil, fmt.Errorf("manager cannot be nil")
 	}
 
-	if portNode, err := conf.At("port"); err == nil {
-		if v, _ := portNode.GetInt(); v > 0 {
-			hs.port = v
+	hs := &http_server{
+		manager: m,
+		address: defaultAddress,
+		port:    defaultPort,
+	}
+
+	if conf != nil {
+		if addrNode, err := conf.At("address"); err == nil {
+			if addr, err := addrNode.GetString(); err == nil && addr != "" {
+				hs.address = addr
+			}
+		}
+
+		if portNode, err := conf.At("port"); err == nil {
+			if port, err := portNode.GetInt(); err == nil && port > 0 && port <= 65535 {
+				hs.port = port
+			}
+		}
+
+		if keyNode, err := conf.At("api_key"); err == nil {
+			if key, err := keyNode.GetString(); err == nil && key != "" {
+				hs.apiKey = key
+				hs.apiKeyHash = sha256.Sum256([]byte(key))
+			}
 		}
 	}
 
-	if keyNode, err := conf.At("api_key"); err == nil {
-		hs.api_key, _ = keyNode.GetString()
-	}
-
-	return hs
+	return hs, nil
 }
 
-func (hs *http_server) Start() {
+func (hs *http_server) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/config", hs.handleConfig)
+	mux.HandleFunc("/health", hs.handleHealth)
 
 	addr := fmt.Sprintf("%s:%d", hs.address, hs.port)
 
@@ -52,12 +82,33 @@ func (hs *http_server) Start() {
 		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
 		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-API-Key"},
 		AllowCredentials: false,
+		MaxAge:           3600,
 	}).Handler(mux)
 
-	if err := http.ListenAndServe(addr, handler); err != nil {
-		fmt.Printf("error on listening server: %s\n", err)
-		os.Exit(1)
+	hs.server = &http.Server{
+		Addr:         addr,
+		Handler:      handler,
+		ReadTimeout:  readTimeout,
+		WriteTimeout: writeTimeout,
+		IdleTimeout:  idleTimeout,
 	}
+
+	log.Printf("Starting HTTP server on %s", addr)
+
+	if err := hs.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return fmt.Errorf("server error: %w", err)
+	}
+
+	return nil
+}
+
+func (hs *http_server) Shutdown(ctx context.Context) error {
+	if hs.server == nil {
+		return nil
+	}
+
+	log.Println("Shutting down HTTP server...")
+	return hs.server.Shutdown(ctx)
 }
 
 func (hs *http_server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -73,6 +124,12 @@ func (hs *http_server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (hs *http_server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"ok"}`))
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // GET
 ////////////////////////////////////////////////////////////////////////////////
@@ -83,8 +140,11 @@ func (hs *http_server) onGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Manager locks internally
-	data := hs.buildConfigState()
+	data, err := hs.buildConfigState()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to build config: %s", err))
+		return
+	}
 
 	writeSuccess(w, data)
 }
@@ -99,6 +159,8 @@ func (hs *http_server) onPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Limit request body size
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
 	defer r.Body.Close()
 
 	body, err := io.ReadAll(r.Body)
@@ -107,7 +169,12 @@ func (hs *http_server) onPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var bodyJSON = orderedmap.New()
+	if len(body) == 0 {
+		writeError(w, http.StatusBadRequest, "request body is empty")
+		return
+	}
+
+	bodyJSON := orderedmap.New()
 	if err := json.Unmarshal(body, &bodyJSON); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid JSON: %s", err))
 		return
@@ -125,29 +192,46 @@ func (hs *http_server) onPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	value, _ := bodyJSON.Get("value")
-
-	configHash, err := getString(bodyJSON, "config_hash")
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	// Validate path format
+	if path == "" || path[0] != '/' {
+		writeError(w, http.StatusBadRequest, "path must start with '/'")
 		return
 	}
 
-	// Validate config hash BEFORE modification
-	currentHash := HashSHA256(*(hs.manager.Source().getConfig()))
-	if currentHash != configHash {
-		writeError(w, http.StatusConflict, "config hash mismatch: config changed by someone else")
-		return
+	value, hasValue := bodyJSON.Get("value")
+
+	// Version-based optimistic locking (better than hash)
+	var expectedVersion int64
+	if versionVal, ok := bodyJSON.Get("version"); ok {
+		if versionFloat, ok := versionVal.(float64); ok {
+			expectedVersion = int64(versionFloat)
+		} else {
+			writeError(w, http.StatusBadRequest, "version must be a number")
+			return
+		}
+
+		currentVersion := hs.manager.Version()
+		if currentVersion != expectedVersion {
+			writeError(w, http.StatusConflict,
+				fmt.Sprintf("version mismatch: expected %d, current %d", expectedVersion, currentVersion))
+			return
+		}
 	}
 
-	// Execute operation (Manager locks internally)
+	// Execute operation
 	switch op {
 	case "insert":
+		if !hasValue {
+			writeError(w, http.StatusBadRequest, "value is required for insert")
+			return
+		}
+
 		index, err := getIndex(bodyJSON)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+
 		if err := hs.manager.insert(path, index, value); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -159,24 +243,35 @@ func (hs *http_server) onPost(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+
 		if err := hs.manager.remove(path, index); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
 	case "replace":
+		if !hasValue {
+			writeError(w, http.StatusBadRequest, "value is required for replace")
+			return
+		}
+
 		if err := hs.manager.replace(path, value); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
 	default:
-		writeError(w, http.StatusBadRequest, "unsupported operation")
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("unsupported operation: %s", op))
 		return
 	}
 
 	// Build updated config for response
-	data := hs.buildConfigState()
+	data, err := hs.buildConfigState()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to build config: %s", err))
+		return
+	}
+
 	writeSuccess(w, data)
 }
 
@@ -188,19 +283,32 @@ func (hs *http_server) onOptions(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, X-API-Key")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	writeSuccess(w, orderedmap.New())
+	w.WriteHeader(http.StatusOK)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 // BUILD CONFIG STATE
 ////////////////////////////////////////////////////////////////////////////////
 
-func (hs *http_server) buildConfigState() *orderedmap.OrderedMap {
+func (hs *http_server) buildConfigState() (*orderedmap.OrderedMap, error) {
 	confJSON := orderedmap.New()
 	schemaJSON := orderedmap.New()
 
-	_ = json.Unmarshal([]byte(*(hs.manager.Source().getConfig())), &confJSON)
-	_ = json.Unmarshal([]byte(*(hs.manager.Source().getSchema())), &schemaJSON)
+	configStr := hs.manager.Source().getConfig()
+	if configStr == nil {
+		return nil, fmt.Errorf("config is nil")
+	}
+
+	if err := json.Unmarshal([]byte(*configStr), &confJSON); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+	}
+
+	schemaStr := hs.manager.Source().getSchema()
+	if schemaStr != nil {
+		if err := json.Unmarshal([]byte(*schemaStr), &schemaJSON); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal schema: %w", err)
+		}
+	}
 
 	paths := orderedmap.New()
 	paths.Set("insertable", hs.manager.getInsertablePaths())
@@ -211,9 +319,9 @@ func (hs *http_server) buildConfigState() *orderedmap.OrderedMap {
 	out.Set("modifiable_paths", paths)
 	out.Set("config", confJSON)
 	out.Set("schema", schemaJSON)
-	out.Set("config_hash", HashSHA256(*(hs.manager.Source().getConfig())))
+	out.Set("version", hs.manager.Version())
 
-	return out
+	return out, nil
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -245,6 +353,7 @@ func writeError(w http.ResponseWriter, code int, msg string) {
 func writeSuccess(w http.ResponseWriter, data *orderedmap.OrderedMap) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 
 	resp := orderedmap.New()
 	resp.Set("success", true)
@@ -257,11 +366,14 @@ func writeSuccess(w http.ResponseWriter, data *orderedmap.OrderedMap) {
 func getString(m *orderedmap.OrderedMap, key string) (string, error) {
 	v, ok := m.Get(key)
 	if !ok {
-		return "", fmt.Errorf("%s missing", key)
+		return "", fmt.Errorf("'%s' is missing", key)
 	}
 	s, ok := v.(string)
 	if !ok {
-		return "", fmt.Errorf("%s must be string", key)
+		return "", fmt.Errorf("'%s' must be a string", key)
+	}
+	if s == "" {
+		return "", fmt.Errorf("'%s' cannot be empty", key)
 	}
 	return s, nil
 }
@@ -269,15 +381,29 @@ func getString(m *orderedmap.OrderedMap, key string) (string, error) {
 func getIndex(m *orderedmap.OrderedMap) (int, error) {
 	val, ok := m.Get("index")
 	if !ok {
-		return 0, fmt.Errorf("index missing")
+		return 0, fmt.Errorf("'index' is missing")
 	}
 	f, ok := val.(float64)
 	if !ok {
-		return 0, fmt.Errorf("index must be number")
+		return 0, fmt.Errorf("'index' must be a number")
+	}
+	if f < 0 {
+		return 0, fmt.Errorf("'index' must be non-negative")
 	}
 	return int(f), nil
 }
 
 func (hs *http_server) checkAccess(r *http.Request) bool {
-	return r.Header.Get("X-API-Key") == hs.api_key
+	if hs.apiKey == "" {
+		return true // No auth required if no key set
+	}
+
+	providedKey := r.Header.Get("X-API-Key")
+	if providedKey == "" {
+		return false
+	}
+
+	// Constant-time comparison to prevent timing attacks
+	providedHash := sha256.Sum256([]byte(providedKey))
+	return subtle.ConstantTimeCompare(hs.apiKeyHash[:], providedHash[:]) == 1
 }

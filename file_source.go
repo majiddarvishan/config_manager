@@ -2,23 +2,29 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"sync"
 
 	"github.com/iancoleman/orderedmap"
 )
 
 func parseConfig(config []byte) (*orderedmap.OrderedMap, error) {
-	var result = orderedmap.New()
+	if len(config) == 0 {
+		return nil, fmt.Errorf("config is empty")
+	}
 
-	err := json.Unmarshal([]byte(config), &result)
+	result := orderedmap.New()
+	err := json.Unmarshal(config, &result)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to parse config: %w", err)
 	}
 
 	return result, nil
 }
 
 type FileSource struct {
+	mu           sync.RWMutex
 	configPath   string
 	configObject *orderedmap.OrderedMap
 	config       string
@@ -26,9 +32,13 @@ type FileSource struct {
 }
 
 func NewFileSource(configPath string, schema string) (*FileSource, error) {
+	if configPath == "" {
+		return nil, fmt.Errorf("config path cannot be empty")
+	}
+
 	configBytes, err := os.ReadFile(configPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
 	config, err := parseConfig(configBytes)
@@ -45,30 +55,52 @@ func NewFileSource(configPath string, schema string) (*FileSource, error) {
 }
 
 func (fs *FileSource) getConfigObject() *orderedmap.OrderedMap {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
 	return fs.configObject
 }
 
 func (fs *FileSource) getConfig() *string {
-	return &fs.config
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	config := fs.config
+	return &config
 }
 
 func (fs *FileSource) getSchema() *string {
-	return &fs.schema
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	schema := fs.schema
+	return &schema
 }
 
 func (fs *FileSource) setConfig(conf *orderedmap.OrderedMap) error {
+	if conf == nil {
+		return fmt.Errorf("config cannot be nil")
+	}
+
 	configBytes, err := json.MarshalIndent(conf, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	err = os.WriteFile(fs.configPath, configBytes, os.ModePerm)
+	// Write to temp file first, then rename (atomic operation)
+	tempPath := fs.configPath + ".tmp"
+	err = os.WriteFile(tempPath, configBytes, 0644)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to write temp file: %w", err)
 	}
 
+	err = os.Rename(tempPath, fs.configPath)
+	if err != nil {
+		os.Remove(tempPath) // Clean up temp file
+		return fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	fs.mu.Lock()
 	fs.configObject = conf
 	fs.config = string(configBytes)
+	fs.mu.Unlock()
 
-    return nil
+	return nil
 }
