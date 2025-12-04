@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 type handler_t func(*Node)
@@ -30,7 +31,21 @@ type Manager struct {
 	source      ISource
 	config      *Node
 	modifiables []modifiable
-	version     int64 // Version counter for optimistic locking
+	version     int64
+
+	// Path caching
+	pathCache      map[*Node]string
+	pathCacheValid bool
+
+	// Change history
+	history          *ChangeHistory
+	historyEnabled   bool
+
+	// Custom validators
+	customValidator *customValidator
+
+	// External validation
+	validationService *validationService
 }
 
 func NewManager(source ISource) (*Manager, error) {
@@ -44,10 +59,15 @@ func NewManager(source ISource) (*Manager, error) {
 	}
 
 	m := &Manager{
-		source:      source,
-		config:      root,
-		modifiables: make([]modifiable, 0),
-		version:     1,
+		source:           source,
+		config:           root,
+		modifiables:      make([]modifiable, 0),
+		version:          1,
+		pathCache:        make(map[*Node]string),
+		pathCacheValid:   false,
+		history:          NewChangeHistory(1000),
+		historyEnabled:   true,
+		customValidator:  newCustomValidator(),
 	}
 
 	if err := validate(source.getConfig(), source.getSchema()); err != nil {
@@ -78,13 +98,111 @@ func (m *Manager) Version() int64 {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// INSERT (improved with proper rollback)
+// PATH CACHING
+////////////////////////////////////////////////////////////////////////////////
+
+func (m *Manager) invalidatePathCache() {
+	m.pathCacheValid = false
+	m.pathCache = make(map[*Node]string)
+}
+
+func (m *Manager) rebuildPathCache() {
+	m.pathCache = make(map[*Node]string)
+	m.buildPathCacheRecursive(m.config, "")
+	m.pathCacheValid = true
+}
+
+func (m *Manager) buildPathCacheRecursive(node *Node, path string) {
+	m.pathCache[node] = path
+
+	if node.Type() == Object {
+		obj, _ := node.GetObject()
+		for key, child := range obj {
+			m.buildPathCacheRecursive(child, path+"/"+key)
+		}
+	} else if node.Type() == Array {
+		arr, _ := node.GetArray()
+		for i, child := range arr {
+			m.buildPathCacheRecursive(child, path+"/"+fmt.Sprintf("%d", i))
+		}
+	}
+}
+
+func (m *Manager) findNodePathCached(n *Node) string {
+	if !m.pathCacheValid {
+		m.rebuildPathCache()
+	}
+	if path, ok := m.pathCache[n]; ok {
+		return path
+	}
+	return ""
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// HISTORY
+////////////////////////////////////////////////////////////////////////////////
+
+func (m *Manager) EnableHistory(enabled bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.historyEnabled = enabled
+}
+
+func (m *Manager) GetHistory() []ChangeEvent {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.history.GetAll()
+}
+
+func (m *Manager) GetHistoryByPath(path string, limit int) []ChangeEvent {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.history.GetByPath(path, limit)
+}
+
+func (m *Manager) ClearHistory() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.history.Clear()
+}
+
+func (m *Manager) addHistoryEvent(event ChangeEvent) {
+	if m.historyEnabled && m.history != nil {
+		m.history.Add(event)
+	}
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// VALIDATION
+////////////////////////////////////////////////////////////////////////////////
+
+func (m *Manager) SetValidationService(service *validationService) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.validationService = service
+}
+
+func (m *Manager) AddValidator(path string, validator validatorFunc) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.customValidator.AddValidator(path, validator)
+}
+
+func (m *Manager) GetCustomValidator() *customValidator {
+	return m.customValidator
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// INSERT (improved with all features)
 ////////////////////////////////////////////////////////////////////////////////
 
 func (m *Manager) insert(path string, index int, value interface{}) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.insertLocked(path, index, value)
+}
 
+func (m *Manager) insertLocked(path string, index int, value interface{}) error {
 	mod, err := m.findModifiableLocked(Insertable, path)
 	if err != nil {
 		return err
@@ -97,6 +215,12 @@ func (m *Manager) insert(path string, index int, value interface{}) error {
 	}
 	if index < 0 || index > len(array) {
 		return fmt.Errorf("index %d out of bounds [0,%d]", index, len(array))
+	}
+
+	// Custom validation
+	newNode := parseNode(value)
+	if err := m.customValidator.Validate(path, nil, newNode); err != nil {
+		return fmt.Errorf("custom validation failed: %w", err)
 	}
 
 	// Clone and validate
@@ -113,12 +237,11 @@ func (m *Manager) insert(path string, index int, value interface{}) error {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
-	// Create backup for rollback
+	// Backup for rollback
 	oldArray := make([]*Node, len(array))
 	copy(oldArray, array)
 
 	// Mutate in-memory node
-	newNode := parseNode(value)
 	newArr := make([]*Node, 0, len(array)+1)
 	newArr = append(newArr, array[:index]...)
 	newArr = append(newArr, newNode)
@@ -127,24 +250,31 @@ func (m *Manager) insert(path string, index int, value interface{}) error {
 
 	// Persist changes
 	if err := m.source.setConfig(jsonConfig); err != nil {
-		// Rollback on failure
 		*mod.Node = Node{oldArray}
 		return fmt.Errorf("failed to persist config: %w", err)
 	}
 
 	m.version++
+	m.invalidatePathCache()
 	m.updateModifiablesLocked()
 
-	// Call handler AFTER successful persistence, outside of critical section
-	handler := mod.Handler
-	handlerNode := newNode
+	// Add to history
+	m.addHistoryEvent(ChangeEvent{
+		Timestamp: timeNow(),
+		Operation: "insert",
+		Path:      path,
+		Index:     &index,
+		NewValue:  value,
+		Version:   m.version,
+	})
 
+	// Call handler after successful persistence
+	handler := mod.Handler
 	if handler != nil {
-		// Unlock during handler execution to avoid deadlocks
-		// Handler gets a copy so it can't corrupt state
+		// handlerNode := newNode.DeepCopy()
+        handlerNode := newNode
 		m.mu.Unlock()
-		// handler(handlerNode.DeepCopy())
-        handler(handlerNode)
+		handler(handlerNode)
 		m.mu.Lock()
 	}
 
@@ -152,13 +282,16 @@ func (m *Manager) insert(path string, index int, value interface{}) error {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// REMOVE (improved with proper rollback)
+// REMOVE (improved with all features)
 ////////////////////////////////////////////////////////////////////////////////
 
 func (m *Manager) remove(path string, index int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.removeLocked(path, index)
+}
 
+func (m *Manager) removeLocked(path string, index int) error {
 	mod, err := m.findModifiableLocked(Removable, path)
 	if err != nil {
 		return err
@@ -204,15 +337,25 @@ func (m *Manager) remove(path string, index int) error {
 	}
 
 	m.version++
+	m.invalidatePathCache()
 	m.updateModifiablesLocked()
 
-	handler := mod.Handler
-	handlerNode := removedNode
+	// Add to history
+	m.addHistoryEvent(ChangeEvent{
+		Timestamp: timeNow(),
+		Operation: "remove",
+		Path:      path,
+		Index:     &index,
+		OldValue:  removedNode.value,
+		Version:   m.version,
+	})
 
+	handler := mod.Handler
 	if handler != nil {
+		// handlerNode := removedNode.DeepCopy()
+        handlerNode := removedNode
 		m.mu.Unlock()
-		// handler(handlerNode.DeepCopy())
-        handler(handlerNode)
+		handler(handlerNode)
 		m.mu.Lock()
 	}
 
@@ -220,16 +363,25 @@ func (m *Manager) remove(path string, index int) error {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// REPLACE (improved with proper rollback)
+// REPLACE (improved with all features)
 ////////////////////////////////////////////////////////////////////////////////
 
 func (m *Manager) replace(path string, value interface{}) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.replaceLocked(path, value)
+}
 
+func (m *Manager) replaceLocked(path string, value interface{}) error {
 	mod, err := m.findModifiableLocked(Replaceable, path)
 	if err != nil {
 		return err
+	}
+
+	// Custom validation
+	newNode := parseNode(value)
+	if err := m.customValidator.Validate(path, mod.Node, newNode); err != nil {
+		return fmt.Errorf("custom validation failed: %w", err)
 	}
 
 	jsonConfig, err := Clone(m.source.getConfigObject())
@@ -247,9 +399,9 @@ func (m *Manager) replace(path string, value interface{}) error {
 
 	// Backup for rollback
 	oldNode := *mod.Node
+	oldValue := oldNode.value
 
 	// Mutate
-	newNode := parseNode(value)
 	*mod.Node = *newNode
 
 	// Persist
@@ -259,15 +411,25 @@ func (m *Manager) replace(path string, value interface{}) error {
 	}
 
 	m.version++
+	m.invalidatePathCache()
 	m.updateModifiablesLocked()
 
-	handler := mod.Handler
-	handlerNode := mod.Node
+	// Add to history
+	m.addHistoryEvent(ChangeEvent{
+		Timestamp: timeNow(),
+		Operation: "replace",
+		Path:      path,
+		OldValue:  oldValue,
+		NewValue:  value,
+		Version:   m.version,
+	})
 
+	handler := mod.Handler
 	if handler != nil {
+		// handlerNode := mod.Node.DeepCopy()
+        handlerNode := mod.Node
 		m.mu.Unlock()
-		// handler(handlerNode.DeepCopy())
-        handler(handlerNode)
+		handler(handlerNode)
 		m.mu.Lock()
 	}
 
@@ -384,7 +546,6 @@ func (m *Manager) findModifiableLocked(t modifiableType, path string) (*modifiab
 }
 
 func (m *Manager) updateModifiablesLocked() {
-	// Remove invalid modifiables
 	validMods := make([]modifiable, 0, len(m.modifiables))
 	for _, mod := range m.modifiables {
 		if path := m.findNodePathLocked(mod.Node); path != "" {
@@ -396,6 +557,9 @@ func (m *Manager) updateModifiablesLocked() {
 }
 
 func (m *Manager) findNodePathLocked(n *Node) string {
+	if m.pathCacheValid {
+		return m.findNodePathCached(n)
+	}
 	return findNodePath(m.config, n)
 }
 
@@ -418,4 +582,9 @@ func validateJSONAgainstSchema(obj interface{}, schema *string) error {
 	}
 	s := string(b)
 	return validate(&s, schema)
+}
+
+// Helper for testing/mocking time
+var timeNow = func() time.Time {
+	return time.Now()
 }
