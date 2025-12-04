@@ -17,30 +17,99 @@ import (
 )
 
 const (
-	maxBodySize       = 10 * 1024 * 1024 // 10MB max request body
-	defaultAddress    = "localhost"
-	defaultPort       = 8080
-	shutdownTimeout   = 30 * time.Second
-	readTimeout       = 15 * time.Second
-	writeTimeout      = 15 * time.Second
-	idleTimeout       = 60 * time.Second
+	maxBodySize     = 10 * 1024 * 1024 // 10MB max request body
+	defaultAddress  = "localhost"
+	defaultPort     = 8080
+	shutdownTimeout = 30 * time.Second
+	readTimeout     = 15 * time.Second
+	writeTimeout    = 15 * time.Second
+	idleTimeout     = 60 * time.Second
 )
 
-type http_server struct {
+type HttpServer struct {
 	address   string
 	port      int
 	apiKey    string
-	apiKeyHash [32]byte // Store hash for comparison
+	apiKeyHash [32]byte
 	manager   *Manager
 	server    *http.Server
+	userProvided bool // Track if server was user-provided
 }
 
-func NewHttpServer(m *Manager, conf *Node) (*http_server, error) {
+// HttpServerOption is a function that configures HttpServer
+type HttpServerOption func(*HttpServer)
+
+// WithAddress sets the server address
+func WithAddress(address string) HttpServerOption {
+	return func(hs *HttpServer) {
+		hs.address = address
+	}
+}
+
+// WithPort sets the server port
+func WithPort(port int) HttpServerOption {
+	return func(hs *HttpServer) {
+		if port > 0 && port <= 65535 {
+			hs.port = port
+		}
+	}
+}
+
+// WithAPIKey sets the API key for authentication
+func WithAPIKey(apiKey string) HttpServerOption {
+	return func(hs *HttpServer) {
+		if apiKey != "" {
+			hs.apiKey = apiKey
+			hs.apiKeyHash = sha256.Sum256([]byte(apiKey))
+		}
+	}
+}
+
+// WithServer sets a user-provided http.Server
+// The server's Handler will be set by the HttpServer
+func WithServer(server *http.Server) HttpServerOption {
+	return func(hs *HttpServer) {
+		if server != nil {
+			hs.server = server
+			hs.userProvided = true
+			// Extract address and port from server if available
+			if server.Addr != "" {
+				// User's server address takes precedence
+				hs.address = ""
+				hs.port = 0
+			}
+		}
+	}
+}
+
+// NewHttpServer creates a new HTTP server for the config manager
+// If no server is provided via options, a default server will be created
+func NewHttpServer(m *Manager, opts ...HttpServerOption) (*HttpServer, error) {
 	if m == nil {
 		return nil, fmt.Errorf("manager cannot be nil")
 	}
 
-	hs := &http_server{
+	hs := &HttpServer{
+		manager: m,
+		address: defaultAddress,
+		port:    defaultPort,
+	}
+
+	// Apply options
+	for _, opt := range opts {
+		opt(hs)
+	}
+
+	return hs, nil
+}
+
+// NewHttpServerFromNode creates HTTP server from config node (legacy compatibility)
+func NewHttpServerFromNode(m *Manager, conf *Node) (*HttpServer, error) {
+	if m == nil {
+		return nil, fmt.Errorf("manager cannot be nil")
+	}
+
+	hs := &HttpServer{
 		manager: m,
 		address: defaultAddress,
 		port:    defaultPort,
@@ -70,13 +139,14 @@ func NewHttpServer(m *Manager, conf *Node) (*http_server, error) {
 	return hs, nil
 }
 
-func (hs *http_server) Start() error {
+// GetHandler returns the http.Handler for the config endpoints
+// Use this to integrate with your own server/router
+func (hs *HttpServer) GetHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/config", hs.handleConfig)
 	mux.HandleFunc("/health", hs.handleHealth)
 
-	addr := fmt.Sprintf("%s:%d", hs.address, hs.port)
-
+	// Apply CORS
 	handler := cors.New(cors.Options{
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
@@ -85,15 +155,40 @@ func (hs *http_server) Start() error {
 		MaxAge:           3600,
 	}).Handler(mux)
 
-	hs.server = &http.Server{
-		Addr:         addr,
-		Handler:      handler,
-		ReadTimeout:  readTimeout,
-		WriteTimeout: writeTimeout,
-		IdleTimeout:  idleTimeout,
-	}
+	return handler
+}
 
-	log.Printf("Starting HTTP server on %s", addr)
+// SetupRoutes configures routes on an existing http.ServeMux
+// Use this to add config endpoints to your existing mux
+func (hs *HttpServer) SetupRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/config", hs.handleConfig)
+	mux.HandleFunc("/health", hs.handleHealth)
+}
+
+// Start starts the HTTP server
+// If a user-provided server was given, it will use that server
+// Otherwise, it creates a default server
+func (hs *HttpServer) Start() error {
+	handler := hs.GetHandler()
+
+	if hs.server == nil {
+		// Create default server
+		addr := fmt.Sprintf("%s:%d", hs.address, hs.port)
+		hs.server = &http.Server{
+			Addr:         addr,
+			Handler:      handler,
+			ReadTimeout:  readTimeout,
+			WriteTimeout: writeTimeout,
+			IdleTimeout:  idleTimeout,
+		}
+		log.Printf("Starting HTTP server on %s", addr)
+	} else {
+		// Use user-provided server, just set the handler
+		if hs.userProvided {
+			log.Printf("Using user-provided HTTP server at %s", hs.server.Addr)
+		}
+		hs.server.Handler = handler
+	}
 
 	if err := hs.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("server error: %w", err)
@@ -102,7 +197,34 @@ func (hs *http_server) Start() error {
 	return nil
 }
 
-func (hs *http_server) Shutdown(ctx context.Context) error {
+// StartTLS starts the HTTP server with TLS
+func (hs *HttpServer) StartTLS(certFile, keyFile string) error {
+	handler := hs.GetHandler()
+
+	if hs.server == nil {
+		addr := fmt.Sprintf("%s:%d", hs.address, hs.port)
+		hs.server = &http.Server{
+			Addr:         addr,
+			Handler:      handler,
+			ReadTimeout:  readTimeout,
+			WriteTimeout: writeTimeout,
+			IdleTimeout:  idleTimeout,
+		}
+		log.Printf("Starting HTTPS server on %s", addr)
+	} else {
+		hs.server.Handler = handler
+		log.Printf("Using user-provided HTTPS server at %s", hs.server.Addr)
+	}
+
+	if err := hs.server.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
+		return fmt.Errorf("server error: %w", err)
+	}
+
+	return nil
+}
+
+// Shutdown gracefully shuts down the HTTP server
+func (hs *HttpServer) Shutdown(ctx context.Context) error {
 	if hs.server == nil {
 		return nil
 	}
@@ -111,7 +233,13 @@ func (hs *http_server) Shutdown(ctx context.Context) error {
 	return hs.server.Shutdown(ctx)
 }
 
-func (hs *http_server) handleConfig(w http.ResponseWriter, r *http.Request) {
+// GetServer returns the underlying http.Server
+// Useful if you need to configure it further after creation
+func (hs *HttpServer) GetServer() *http.Server {
+	return hs.server
+}
+
+func (hs *HttpServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		hs.onGet(w, r)
@@ -124,7 +252,7 @@ func (hs *http_server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (hs *http_server) handleHealth(w http.ResponseWriter, r *http.Request) {
+func (hs *HttpServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"ok"}`))
@@ -134,7 +262,7 @@ func (hs *http_server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // GET
 ////////////////////////////////////////////////////////////////////////////////
 
-func (hs *http_server) onGet(w http.ResponseWriter, r *http.Request) {
+func (hs *HttpServer) onGet(w http.ResponseWriter, r *http.Request) {
 	if !hs.checkAccess(r) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
@@ -153,7 +281,7 @@ func (hs *http_server) onGet(w http.ResponseWriter, r *http.Request) {
 // POST
 ////////////////////////////////////////////////////////////////////////////////
 
-func (hs *http_server) onPost(w http.ResponseWriter, r *http.Request) {
+func (hs *HttpServer) onPost(w http.ResponseWriter, r *http.Request) {
 	if !hs.checkAccess(r) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
@@ -279,7 +407,7 @@ func (hs *http_server) onPost(w http.ResponseWriter, r *http.Request) {
 // OPTIONS
 ////////////////////////////////////////////////////////////////////////////////
 
-func (hs *http_server) onOptions(w http.ResponseWriter) {
+func (hs *HttpServer) onOptions(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, X-API-Key")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -290,7 +418,7 @@ func (hs *http_server) onOptions(w http.ResponseWriter) {
 // BUILD CONFIG STATE
 ////////////////////////////////////////////////////////////////////////////////
 
-func (hs *http_server) buildConfigState() (*orderedmap.OrderedMap, error) {
+func (hs *HttpServer) buildConfigState() (*orderedmap.OrderedMap, error) {
 	confJSON := orderedmap.New()
 	schemaJSON := orderedmap.New()
 
@@ -393,7 +521,7 @@ func getIndex(m *orderedmap.OrderedMap) (int, error) {
 	return int(f), nil
 }
 
-func (hs *http_server) checkAccess(r *http.Request) bool {
+func (hs *HttpServer) checkAccess(r *http.Request) bool {
 	if hs.apiKey == "" {
 		return true // No auth required if no key set
 	}
