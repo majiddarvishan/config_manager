@@ -1,4 +1,4 @@
-package config
+package internal
 
 import (
 	"bytes"
@@ -10,8 +10,8 @@ import (
 	"time"
 )
 
-// validationService provides external configuration validation
-type validationService struct {
+// ValidationService provides external configuration validation
+type ValidationService struct {
 	URL     string
 	Timeout time.Duration
 	Headers map[string]string
@@ -33,12 +33,12 @@ type ValidationResponse struct {
 }
 
 // NewValidationService creates a new validation service client
-func NewValidationService(url string, timeout time.Duration) *validationService {
+func NewValidationService(url string, timeout time.Duration) *ValidationService {
 	if timeout == 0 {
 		timeout = 10 * time.Second
 	}
 
-	return &validationService{
+	return &ValidationService{
 		URL:     url,
 		Timeout: timeout,
 		Headers: make(map[string]string),
@@ -49,12 +49,12 @@ func NewValidationService(url string, timeout time.Duration) *validationService 
 }
 
 // SetHeader sets a custom header for validation requests
-func (vs *validationService) SetHeader(key, value string) {
+func (vs *ValidationService) SetHeader(key, value string) {
 	vs.Headers[key] = value
 }
 
 // Validate sends configuration to external validation service
-func (vs *validationService) Validate(ctx context.Context, config, schema interface{}) error {
+func (vs *ValidationService) Validate(ctx context.Context, config, schema interface{}) error {
 	if vs.URL == "" {
 		return fmt.Errorf("validation service URL not configured")
 	}
@@ -108,25 +108,25 @@ func (vs *validationService) Validate(ctx context.Context, config, schema interf
 // validatorFunc is a custom validation function
 type validatorFunc func(path string, oldValue, newValue *Node) error
 
-// customValidator holds custom validation rules
-type customValidator struct {
+// CustomValidator holds custom validation rules
+type CustomValidator struct {
 	validators map[string][]validatorFunc
 }
 
 // newCustomValidator creates a new custom validator
-func newCustomValidator() *customValidator {
-	return &customValidator{
+func newCustomValidator() *CustomValidator {
+	return &CustomValidator{
 		validators: make(map[string][]validatorFunc),
 	}
 }
 
 // AddValidator adds a validation function for a specific path
-func (cv *customValidator) AddValidator(path string, validator validatorFunc) {
+func (cv *CustomValidator) AddValidator(path string, validator validatorFunc) {
 	cv.validators[path] = append(cv.validators[path], validator)
 }
 
 // Validate runs all validators for the given path
-func (cv *customValidator) Validate(path string, oldValue, newValue *Node) error {
+func (cv *CustomValidator) Validate(path string, oldValue, newValue *Node) error {
 	validators, exists := cv.validators[path]
 	if !exists {
 		return nil
@@ -142,7 +142,7 @@ func (cv *customValidator) Validate(path string, oldValue, newValue *Node) error
 }
 
 // ValidateAll runs validators for all registered paths
-func (cv *customValidator) ValidateAll(changes map[string]*Node) error {
+func (cv *CustomValidator) ValidateAll(changes map[string]*Node) error {
 	for path, newValue := range changes {
 		if err := cv.Validate(path, nil, newValue); err != nil {
 			return fmt.Errorf("validation failed at %s: %w", path, err)

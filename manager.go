@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	cnfHistory "github.com/majiddarvishan/config_manager/history"
+    cnfInternal "github.com/majiddarvishan/config_manager/internal"
 )
 
 type handler_t func(*Node)
@@ -38,14 +41,14 @@ type Manager struct {
 	pathCacheValid bool
 
 	// Change history
-	history          *ChangeHistory
+	history          *cnfHistory.ChangeHistory
 	historyEnabled   bool
 
 	// Custom validators
-	customValidator *customValidator
+	customValidator *cnfInternal.CustomValidator
 
 	// External validation
-	validationService *validationService
+	validationService *cnfInternal.ValidationService
 }
 
 func NewManager(source ISource) (*Manager, error) {
