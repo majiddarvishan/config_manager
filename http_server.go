@@ -1,4 +1,4 @@
-package http
+package config
 
 import (
 	"context"
@@ -82,9 +82,9 @@ func WithServer(server *http.Server) HttpServerOption {
 	}
 }
 
-// NewHttpServer creates a new HTTP server for the config manager
+// newHttpServer creates a new HTTP server for the config manager
 // If no server is provided via options, a default server will be created
-func NewHttpServer(m *Manager, opts ...HttpServerOption) (*HttpServer, error) {
+func newHttpServer(m *Manager, opts ...HttpServerOption) (*HttpServer, error) {
 	if m == nil {
 		return nil, fmt.Errorf("manager cannot be nil")
 	}
@@ -103,8 +103,8 @@ func NewHttpServer(m *Manager, opts ...HttpServerOption) (*HttpServer, error) {
 	return hs, nil
 }
 
-// NewHttpServerFromNode creates HTTP server from config node (legacy compatibility)
-func NewHttpServerFromNode(m *Manager, conf *Node) (*HttpServer, error) {
+// newHttpServerFromNode creates HTTP server from config node (legacy compatibility)
+func newHttpServerFromNode(m *Manager, conf *Node) (*HttpServer, error) {
 	if m == nil {
 		return nil, fmt.Errorf("manager cannot be nil")
 	}

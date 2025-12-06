@@ -1,14 +1,14 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
 	"time"
 
-	cnfHistory "github.com/majiddarvishan/config_manager/history"
-    cnfInternal "github.com/majiddarvishan/config_manager/internal"
+	"github.com/majiddarvishan/config_manager/history"
 )
 
 type handler_t func(*Node)
@@ -41,14 +41,17 @@ type Manager struct {
 	pathCacheValid bool
 
 	// Change history
-	history          *cnfHistory.ChangeHistory
-	historyEnabled   bool
+	history        *history.ChangeHistory
+	historyEnabled bool
 
 	// Custom validators
-	customValidator *cnfInternal.CustomValidator
+	customValidator *customValidator
 
 	// External validation
-	validationService *cnfInternal.ValidationService
+	validationService *validationService
+
+	// Http Server
+	httpServer *HttpServer
 }
 
 func NewManager(source ISource) (*Manager, error) {
@@ -62,15 +65,15 @@ func NewManager(source ISource) (*Manager, error) {
 	}
 
 	m := &Manager{
-		source:           source,
-		config:           root,
-		modifiables:      make([]modifiable, 0),
-		version:          1,
-		pathCache:        make(map[*Node]string),
-		pathCacheValid:   false,
-		history:          NewChangeHistory(1000),
-		historyEnabled:   true,
-		customValidator:  newCustomValidator(),
+		source:          source,
+		config:          root,
+		modifiables:     make([]modifiable, 0),
+		version:         1,
+		pathCache:       make(map[*Node]string),
+		pathCacheValid:  false,
+		history:         history.NewChangeHistory(1000),
+		historyEnabled:  true,
+		customValidator: NewCustomValidator(),
 	}
 
 	if err := validate(source.getConfig(), source.getSchema()); err != nil {
@@ -85,7 +88,7 @@ func (m *Manager) Config() *Node {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	// return m.config.DeepCopy()
-    return m.config
+	return m.config
 }
 
 func (m *Manager) Source() ISource {
@@ -151,13 +154,13 @@ func (m *Manager) EnableHistory(enabled bool) {
 	m.historyEnabled = enabled
 }
 
-func (m *Manager) GetHistory() []ChangeEvent {
+func (m *Manager) GetHistory() []history.ChangeEvent {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.history.GetAll()
 }
 
-func (m *Manager) GetHistoryByPath(path string, limit int) []ChangeEvent {
+func (m *Manager) GetHistoryByPath(path string, limit int) []history.ChangeEvent {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.history.GetByPath(path, limit)
@@ -169,7 +172,7 @@ func (m *Manager) ClearHistory() {
 	m.history.Clear()
 }
 
-func (m *Manager) addHistoryEvent(event ChangeEvent) {
+func (m *Manager) addHistoryEvent(event history.ChangeEvent) {
 	if m.historyEnabled && m.history != nil {
 		m.history.Add(event)
 	}
@@ -193,6 +196,43 @@ func (m *Manager) AddValidator(path string, validator validatorFunc) {
 
 func (m *Manager) GetCustomValidator() *customValidator {
 	return m.customValidator
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// HTTP Server
+////////////////////////////////////////////////////////////////////////////////
+
+func (m *Manager) NewHttpServerFromNode(conf *Node) error {
+	var err error
+	m.httpServer, err = newHttpServerFromNode(m, conf)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (m *Manager) NewHttpServer(opts ...HttpServerOption) error {
+	var err error
+	m.httpServer, err = newHttpServer(m, opts...)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (m *Manager) StartHttpServer() {
+	go m.httpServer.Start()
+}
+
+func (m *Manager) StopHttpServer() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := m.httpServer.Shutdown(ctx); err != nil {
+		fmt.Printf("Shutdown error: %v", err)
+	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -262,7 +302,7 @@ func (m *Manager) insertLocked(path string, index int, value interface{}) error 
 	m.updateModifiablesLocked()
 
 	// Add to history
-	m.addHistoryEvent(ChangeEvent{
+	m.addHistoryEvent(history.ChangeEvent{
 		Timestamp: timeNow(),
 		Operation: "insert",
 		Path:      path,
@@ -275,7 +315,7 @@ func (m *Manager) insertLocked(path string, index int, value interface{}) error 
 	handler := mod.Handler
 	if handler != nil {
 		// handlerNode := newNode.DeepCopy()
-        handlerNode := newNode
+		handlerNode := newNode
 		m.mu.Unlock()
 		handler(handlerNode)
 		m.mu.Lock()
@@ -344,7 +384,7 @@ func (m *Manager) removeLocked(path string, index int) error {
 	m.updateModifiablesLocked()
 
 	// Add to history
-	m.addHistoryEvent(ChangeEvent{
+	m.addHistoryEvent(history.ChangeEvent{
 		Timestamp: timeNow(),
 		Operation: "remove",
 		Path:      path,
@@ -356,7 +396,7 @@ func (m *Manager) removeLocked(path string, index int) error {
 	handler := mod.Handler
 	if handler != nil {
 		// handlerNode := removedNode.DeepCopy()
-        handlerNode := removedNode
+		handlerNode := removedNode
 		m.mu.Unlock()
 		handler(handlerNode)
 		m.mu.Lock()
@@ -418,7 +458,7 @@ func (m *Manager) replaceLocked(path string, value interface{}) error {
 	m.updateModifiablesLocked()
 
 	// Add to history
-	m.addHistoryEvent(ChangeEvent{
+	m.addHistoryEvent(history.ChangeEvent{
 		Timestamp: timeNow(),
 		Operation: "replace",
 		Path:      path,
@@ -430,7 +470,7 @@ func (m *Manager) replaceLocked(path string, value interface{}) error {
 	handler := mod.Handler
 	if handler != nil {
 		// handlerNode := mod.Node.DeepCopy()
-        handlerNode := mod.Node
+		handlerNode := mod.Node
 		m.mu.Unlock()
 		handler(handlerNode)
 		m.mu.Lock()
