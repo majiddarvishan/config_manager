@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/iancoleman/orderedmap"
 	"github.com/rs/cors"
 )
@@ -187,7 +188,9 @@ func (hs *HttpServer) Start() error {
 		if hs.userProvided {
 			log.Printf("Using user-provided HTTP server at %s", hs.server.Addr)
 		}
-		hs.server.Handler = handler
+        hs.server.Handler.(*mux.Router).HandleFunc("/config", hs.handleConfig)
+        hs.server.Handler.(*mux.Router).HandleFunc("/health", hs.handleHealth)
+
 		return nil
 	}
 
