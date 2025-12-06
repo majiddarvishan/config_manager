@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/majiddarvishan/config_manager/history"
+	"github.com/majiddarvishan/goconfig/history"
 )
 
 type handler_t func(*Node)

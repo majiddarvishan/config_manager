@@ -1,4 +1,4 @@
-# config_manager
+# goconfig
 
 config manager for Golang applications
 
@@ -7,7 +7,7 @@ config manager for Golang applications
 You can use _go get_:
 
 ```bash
-go get -u github.com/majiddarvishan/config_manager
+go get -u github.com/majiddarvishan/goconfig
 ```
 
 ## Usage

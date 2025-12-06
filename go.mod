@@ -1,4 +1,4 @@
-module github.com/majiddarvishan/config_manager
+module github.com/majiddarvishan/goconfig
 
 go 1.18
 
