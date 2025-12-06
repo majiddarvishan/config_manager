@@ -27,12 +27,12 @@ const (
 )
 
 type HttpServer struct {
-	address   string
-	port      int
-	apiKey    string
-	apiKeyHash [32]byte
-	manager   *Manager
-	server    *http.Server
+	address      string
+	port         int
+	apiKey       string
+	apiKeyHash   [32]byte
+	manager      *Manager
+	server       *http.Server
 	userProvided bool // Track if server was user-provided
 }
 
@@ -188,6 +188,7 @@ func (hs *HttpServer) Start() error {
 			log.Printf("Using user-provided HTTP server at %s", hs.server.Addr)
 		}
 		hs.server.Handler = handler
+		return nil
 	}
 
 	if err := hs.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
