@@ -11,7 +11,7 @@ import (
 	"github.com/majiddarvishan/goconfig/history"
 )
 
-type handler_t func(*Node)
+type handler_t func(*Node) error
 
 type modifiableType int
 
@@ -291,6 +291,21 @@ func (m *Manager) insertLocked(path string, index int, value interface{}) error 
 	newArr = append(newArr, array[index:]...)
 	*mod.Node = Node{newArr}
 
+	// Call handler after successful persistence
+	handler := mod.Handler
+	if handler != nil {
+		// handlerNode := newNode.DeepCopy()
+		handlerNode := newNode
+		m.mu.Unlock()
+		err := handler(handlerNode)
+		m.mu.Lock()
+
+		if err != nil {
+			*mod.Node = Node{oldArray}
+			return err
+		}
+	}
+
 	// Persist changes
 	if err := m.source.setConfig(jsonConfig); err != nil {
 		*mod.Node = Node{oldArray}
@@ -310,16 +325,6 @@ func (m *Manager) insertLocked(path string, index int, value interface{}) error 
 		NewValue:  value,
 		Version:   m.version,
 	})
-
-	// Call handler after successful persistence
-	handler := mod.Handler
-	if handler != nil {
-		// handlerNode := newNode.DeepCopy()
-		handlerNode := newNode
-		m.mu.Unlock()
-		handler(handlerNode)
-		m.mu.Lock()
-	}
 
 	return nil
 }
@@ -373,6 +378,20 @@ func (m *Manager) removeLocked(path string, index int) error {
 	newArr = append(newArr, array[index+1:]...)
 	*mod.Node = Node{newArr}
 
+	handler := mod.Handler
+	if handler != nil {
+		// handlerNode := removedNode.DeepCopy()
+		handlerNode := removedNode
+		m.mu.Unlock()
+		err := handler(handlerNode)
+		m.mu.Lock()
+
+		if err != nil {
+			*mod.Node = Node{oldArray}
+			return err
+		}
+	}
+
 	// Persist
 	if err := m.source.setConfig(jsonConfig); err != nil {
 		*mod.Node = Node{oldArray}
@@ -392,15 +411,6 @@ func (m *Manager) removeLocked(path string, index int) error {
 		OldValue:  removedNode.value,
 		Version:   m.version,
 	})
-
-	handler := mod.Handler
-	if handler != nil {
-		// handlerNode := removedNode.DeepCopy()
-		handlerNode := removedNode
-		m.mu.Unlock()
-		handler(handlerNode)
-		m.mu.Lock()
-	}
 
 	return nil
 }
@@ -447,6 +457,20 @@ func (m *Manager) replaceLocked(path string, value interface{}) error {
 	// Mutate
 	*mod.Node = *newNode
 
+	handler := mod.Handler
+	if handler != nil {
+		// handlerNode := mod.Node.DeepCopy()
+		handlerNode := mod.Node
+		m.mu.Unlock()
+		err := handler(handlerNode)
+		m.mu.Lock()
+
+		if err != nil {
+			*mod.Node = oldNode
+			return err
+		}
+	}
+
 	// Persist
 	if err := m.source.setConfig(jsonConfig); err != nil {
 		*mod.Node = oldNode
@@ -466,15 +490,6 @@ func (m *Manager) replaceLocked(path string, value interface{}) error {
 		NewValue:  value,
 		Version:   m.version,
 	})
-
-	handler := mod.Handler
-	if handler != nil {
-		// handlerNode := mod.Node.DeepCopy()
-		handlerNode := mod.Node
-		m.mu.Unlock()
-		handler(handlerNode)
-		m.mu.Lock()
-	}
 
 	return nil
 }
