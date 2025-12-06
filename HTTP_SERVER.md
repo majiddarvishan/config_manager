@@ -14,23 +14,22 @@ The `HttpServer` provides a flexible HTTP interface for configuration management
 
 ```go
 manager, _ := config.NewManager(source)
-httpServer, _ := config.NewHttpServer(manager)
+_ := manager.NewHttpServer()
 
 // Starts on localhost:8080
-httpServer.Start()
+manager.StartHttpServer()
 ```
 
 ### With Configuration Options
 
 ```go
-httpServer, _ := config.NewHttpServer(
-    manager,
+_ := manager.NewHttpServer(
     config.WithAddress("0.0.0.0"),
     config.WithPort(9090),
     config.WithAPIKey("secret-key"),
 )
 
-httpServer.Start()
+manager.StartHttpServer()
 ```
 
 ## Configuration Options
@@ -53,16 +52,6 @@ config.WithPort(8080)
 config.WithPort(9090)
 ```
 
-### WithAPIKey(apiKey string)
-
-Sets API key for authentication. Requests must include `X-API-Key` header.
-
-```go
-config.WithAPIKey("my-secret-key")
-```
-
-**Security Note**: Uses constant-time comparison to prevent timing attacks.
-
 ### WithServer(server *http.Server)
 
 Provides your own `http.Server` instance. The handler will be set automatically.
@@ -76,8 +65,7 @@ myServer := &http.Server{
     MaxHeaderBytes: 1 << 20,
 }
 
-httpServer, _ := config.NewHttpServer(
-    manager,
+_ := manager.NewHttpServer(
     config.WithServer(myServer),
 )
 ```
@@ -89,17 +77,14 @@ httpServer, _ := config.NewHttpServer(
 Let HttpServer create and manage everything.
 
 ```go
-httpServer, _ := config.NewHttpServer(
-    manager,
+_ :=  manager.NewHttpServer(
     config.WithAddress("0.0.0.0"),
     config.WithPort(8080),
     config.WithAPIKey("secret"),
 )
 
 // Starts the server
-if err := httpServer.Start(); err != nil {
-    log.Fatal(err)
-}
+manager.StartHttpServer()
 ```
 
 **When to use**: Simple deployments, microservices, config-only servers.
