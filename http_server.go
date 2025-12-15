@@ -1,4 +1,4 @@
-package config
+package goconfig
 
 import (
 	"context"
@@ -188,8 +188,8 @@ func (hs *HttpServer) Start() error {
 		if hs.userProvided {
 			log.Printf("Using user-provided HTTP server at %s", hs.server.Addr)
 		}
-        hs.server.Handler.(*mux.Router).HandleFunc("/config", hs.handleConfig)
-        hs.server.Handler.(*mux.Router).HandleFunc("/health", hs.handleHealth)
+		hs.server.Handler.(*mux.Router).HandleFunc("/config", hs.handleConfig)
+		hs.server.Handler.(*mux.Router).HandleFunc("/health", hs.handleHealth)
 
 		return nil
 	}
