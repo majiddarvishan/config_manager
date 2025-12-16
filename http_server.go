@@ -161,9 +161,9 @@ func (hs *HttpServer) GetHandler() http.Handler {
 
 // SetupRoutes configures routes on an existing http.ServeMux
 // Use this to add config endpoints to your existing mux
-func (hs *HttpServer) SetupRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/config", hs.handleConfig)
-	mux.HandleFunc("/health", hs.handleHealth)
+func (hs *HttpServer) SetupRoutes(handler func(string, http.HandlerFunc, ...string)) {
+    handler("/config", hs.handleConfig)
+    handler("/health", hs.handleHealth)
 }
 
 // Start starts the HTTP server

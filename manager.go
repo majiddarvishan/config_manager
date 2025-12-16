@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
@@ -233,6 +234,12 @@ func (m *Manager) StopHttpServer() {
 	if err := m.httpServer.Shutdown(ctx); err != nil {
 		fmt.Printf("Shutdown error: %v", err)
 	}
+}
+
+
+
+func (m *Manager) SetupRoutes(handler func(string, http.HandlerFunc, ...string)) {
+	m.httpServer.SetupRoutes(handler)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
