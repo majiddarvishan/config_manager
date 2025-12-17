@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"sync"
 	"time"
 
@@ -224,7 +223,11 @@ func (m *Manager) NewHttpServer(opts ...HttpServerOption) error {
 }
 
 func (m *Manager) StartHttpServer() {
-	go m.httpServer.Start()
+	go func() {
+		if err := m.httpServer.Start(); err != nil {
+			panic(err)
+		}
+	}()
 }
 
 func (m *Manager) StopHttpServer() {
@@ -236,10 +239,8 @@ func (m *Manager) StopHttpServer() {
 	}
 }
 
-
-
-func (m *Manager) SetupRoutes(handler func(string, http.HandlerFunc, ...string)) {
-	m.httpServer.SetupRoutes(handler)
+func (m *Manager) SetupRoutes(r RouteRegistrar) {
+	m.httpServer.registerRoutes(r)
 }
 
 ////////////////////////////////////////////////////////////////////////////////

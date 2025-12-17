@@ -12,13 +12,12 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gorilla/mux"
 	"github.com/iancoleman/orderedmap"
 	"github.com/rs/cors"
 )
 
 const (
-	maxBodySize     = 10 * 1024 * 1024 // 10MB max request body
+	maxBodySize     = 10 * 1024 * 1024 // 10MB
 	defaultAddress  = "localhost"
 	defaultPort     = 8080
 	shutdownTimeout = 30 * time.Second
@@ -28,26 +27,26 @@ const (
 )
 
 type HttpServer struct {
-	address      string
-	port         int
-	apiKey       string
-	apiKeyHash   [32]byte
-	manager      *Manager
-	server       *http.Server
-	userProvided bool // Track if server was user-provided
+	address    string
+	port       int
+	apiKey     string
+	apiKeyHash [32]byte
+	manager    *Manager
+
+	server     *http.Server
+	registrar  RouteRegistrar // <<<<<< NEW
 }
 
-// HttpServerOption is a function that configures HttpServer
+// ─────────────────────────────────────────────────────────────
+// OPTIONS
+// ─────────────────────────────────────────────────────────────
+
 type HttpServerOption func(*HttpServer)
 
-// WithAddress sets the server address
 func WithAddress(address string) HttpServerOption {
-	return func(hs *HttpServer) {
-		hs.address = address
-	}
+	return func(hs *HttpServer) { hs.address = address }
 }
 
-// WithPort sets the server port
 func WithPort(port int) HttpServerOption {
 	return func(hs *HttpServer) {
 		if port > 0 && port <= 65535 {
@@ -56,7 +55,6 @@ func WithPort(port int) HttpServerOption {
 	}
 }
 
-// WithAPIKey sets the API key for authentication
 func WithAPIKey(apiKey string) HttpServerOption {
 	return func(hs *HttpServer) {
 		if apiKey != "" {
@@ -66,25 +64,24 @@ func WithAPIKey(apiKey string) HttpServerOption {
 	}
 }
 
-// WithServer sets a user-provided http.Server
-// The server's Handler will be set by the HttpServer
-func WithServer(server *http.Server) HttpServerOption {
+// Use when embedding goconfig into another web service
+func WithRouteRegistrar(r RouteRegistrar) HttpServerOption {
 	return func(hs *HttpServer) {
-		if server != nil {
-			hs.server = server
-			hs.userProvided = true
-			// Extract address and port from server if available
-			if server.Addr != "" {
-				// User's server address takes precedence
-				hs.address = ""
-				hs.port = 0
-			}
-		}
+		hs.registrar = r
 	}
 }
 
-// newHttpServer creates a new HTTP server for the config manager
-// If no server is provided via options, a default server will be created
+// Use when goconfig owns the server
+func WithServer(server *http.Server) HttpServerOption {
+	return func(hs *HttpServer) {
+		hs.server = server
+	}
+}
+
+// ─────────────────────────────────────────────────────────────
+// CONSTRUCTORS
+// ─────────────────────────────────────────────────────────────
+
 func newHttpServer(m *Manager, opts ...HttpServerOption) (*HttpServer, error) {
 	if m == nil {
 		return nil, fmt.Errorf("manager cannot be nil")
@@ -96,7 +93,6 @@ func newHttpServer(m *Manager, opts ...HttpServerOption) (*HttpServer, error) {
 		port:    defaultPort,
 	}
 
-	// Apply options
 	for _, opt := range opts {
 		opt(hs)
 	}
@@ -104,106 +100,69 @@ func newHttpServer(m *Manager, opts ...HttpServerOption) (*HttpServer, error) {
 	return hs, nil
 }
 
-// newHttpServerFromNode creates HTTP server from config node (legacy compatibility)
 func newHttpServerFromNode(m *Manager, conf *Node) (*HttpServer, error) {
-	if m == nil {
-		return nil, fmt.Errorf("manager cannot be nil")
+	hs, err := newHttpServer(m)
+	if err != nil {
+		return nil, err
 	}
 
-	hs := &HttpServer{
-		manager: m,
-		address: defaultAddress,
-		port:    defaultPort,
+	if conf == nil {
+		return hs, nil
 	}
 
-	if conf != nil {
-		if addrNode, err := conf.At("address"); err == nil {
-			if addr, err := addrNode.GetString(); err == nil && addr != "" {
-				hs.address = addr
-			}
+	if n, err := conf.At("address"); err == nil {
+		if s, _ := n.GetString(); s != "" {
+			hs.address = s
 		}
+	}
 
-		if portNode, err := conf.At("port"); err == nil {
-			if port, err := portNode.GetInt(); err == nil && port > 0 && port <= 65535 {
-				hs.port = port
-			}
+	if n, err := conf.At("port"); err == nil {
+		if p, _ := n.GetInt(); p > 0 {
+			hs.port = p
 		}
+	}
 
-		if keyNode, err := conf.At("api_key"); err == nil {
-			if key, err := keyNode.GetString(); err == nil && key != "" {
-				hs.apiKey = key
-				hs.apiKeyHash = sha256.Sum256([]byte(key))
-			}
+	if n, err := conf.At("api_key"); err == nil {
+		if k, _ := n.GetString(); k != "" {
+			hs.apiKey = k
+			hs.apiKeyHash = sha256.Sum256([]byte(k))
 		}
 	}
 
 	return hs, nil
 }
 
-// GetHandler returns the http.Handler for the config endpoints
-// Use this to integrate with your own server/router
-func (hs *HttpServer) GetHandler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/config", hs.handleConfig)
-	mux.HandleFunc("/health", hs.handleHealth)
+// ─────────────────────────────────────────────────────────────
+// ROUTES
+// ─────────────────────────────────────────────────────────────
 
-	// Apply CORS
-	handler := cors.New(cors.Options{
-		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
-		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-API-Key"},
-		AllowCredentials: false,
-		MaxAge:           3600,
-	}).Handler(mux)
-
-	return handler
+func (hs *HttpServer) registerRoutes(r RouteRegistrar) {
+	r.HandleFunc("/config", hs.handleConfig, "GET", "POST", "OPTIONS")
+	r.HandleFunc("/health", hs.handleHealth, "GET")
 }
 
-// SetupRoutes configures routes on an existing http.ServeMux
-// Use this to add config endpoints to your existing mux
-func (hs *HttpServer) SetupRoutes(handler func(string, http.HandlerFunc, ...string)) {
-    handler("/config", hs.handleConfig)
-    handler("/health", hs.handleHealth)
-}
+// ─────────────────────────────────────────────────────────────
+// START / STOP
+// ─────────────────────────────────────────────────────────────
 
-// Start starts the HTTP server
-// If a user-provided server was given, it will use that server
-// Otherwise, it creates a default server
 func (hs *HttpServer) Start() error {
-	handler := hs.GetHandler()
-
-	if hs.server == nil {
-		// Create default server
-		addr := fmt.Sprintf("%s:%d", hs.address, hs.port)
-		hs.server = &http.Server{
-			Addr:         addr,
-			Handler:      handler,
-			ReadTimeout:  readTimeout,
-			WriteTimeout: writeTimeout,
-			IdleTimeout:  idleTimeout,
-		}
-		log.Printf("Starting HTTP server on %s", addr)
-	} else {
-		// Use user-provided server, just set the handler
-		if hs.userProvided {
-			log.Printf("Using user-provided HTTP server at %s", hs.server.Addr)
-		}
-		hs.server.Handler.(*mux.Router).HandleFunc("/config", hs.handleConfig)
-		hs.server.Handler.(*mux.Router).HandleFunc("/health", hs.handleHealth)
-
+	// CASE 1: embedded into external web service
+	if hs.registrar != nil {
+		hs.registerRoutes(hs.registrar)
+		log.Println("goconfig routes registered on external server")
 		return nil
 	}
 
-	if err := hs.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("server error: %w", err)
-	}
+	// CASE 2: goconfig owns HTTP server
+	mux := http.NewServeMux()
+	hs.registerRoutes(muxAdapter{mux})
 
-	return nil
-}
-
-// StartTLS starts the HTTP server with TLS
-func (hs *HttpServer) StartTLS(certFile, keyFile string) error {
-	handler := hs.GetHandler()
+	handler := cors.New(cors.Options{
+		AllowedOrigins: []string{"*"},
+		AllowedMethods: []string{"GET", "POST", "OPTIONS"},
+		AllowedHeaders: []string{"Content-Type", "Authorization", "X-API-Key"},
+		MaxAge:         3600,
+	}).Handler(mux)
 
 	if hs.server == nil {
 		addr := fmt.Sprintf("%s:%d", hs.address, hs.port)
@@ -214,34 +173,26 @@ func (hs *HttpServer) StartTLS(certFile, keyFile string) error {
 			WriteTimeout: writeTimeout,
 			IdleTimeout:  idleTimeout,
 		}
-		log.Printf("Starting HTTPS server on %s", addr)
-	} else {
-		hs.server.Handler = handler
-		log.Printf("Using user-provided HTTPS server at %s", hs.server.Addr)
+		log.Printf("Starting goconfig HTTP server on %s", addr)
 	}
 
-	if err := hs.server.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("server error: %w", err)
+	if err := hs.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return err
 	}
-
 	return nil
 }
 
-// Shutdown gracefully shuts down the HTTP server
 func (hs *HttpServer) Shutdown(ctx context.Context) error {
 	if hs.server == nil {
 		return nil
 	}
-
-	log.Println("Shutting down HTTP server...")
+	log.Println("Shutting down goconfig HTTP server")
 	return hs.server.Shutdown(ctx)
 }
 
-// GetServer returns the underlying http.Server
-// Useful if you need to configure it further after creation
-func (hs *HttpServer) GetServer() *http.Server {
-	return hs.server
-}
+// ─────────────────────────────────────────────────────────────
+// HANDLERS (UNCHANGED LOGIC)
+// ─────────────────────────────────────────────────────────────
 
 func (hs *HttpServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -256,7 +207,7 @@ func (hs *HttpServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (hs *HttpServer) handleHealth(w http.ResponseWriter, r *http.Request) {
+func (hs *HttpServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"ok"}`))
