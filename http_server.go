@@ -191,7 +191,7 @@ func (hs *HttpServer) Shutdown(ctx context.Context) error {
 }
 
 // ─────────────────────────────────────────────────────────────
-// HANDLERS (UNCHANGED LOGIC)
+// HANDLERS
 // ─────────────────────────────────────────────────────────────
 
 func (hs *HttpServer) handleConfig(w http.ResponseWriter, r *http.Request) {
